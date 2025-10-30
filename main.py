@@ -14,7 +14,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("logs/bot.log"),
+        logging.FileHandler("logs/bot.log", encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -36,30 +36,35 @@ def fetch_latest_notice():
         
         soup = BeautifulSoup(response.content, "html.parser")
         
-        first_notice = soup.select_one("ul.notice-list li a")
-        if not first_notice:
-            first_notice = soup.select_one("table.notice-table tbody tr a")
-        if not first_notice:
-            first_notice = soup.select_one("div.notice-item a")
-        if not first_notice:
-            first_notice = soup.select_one("a[href*='/service_center/notice']")
+        link_tag = soup.select_one('tr a[href*="/service_center/notice"]')
         
-        if first_notice:
-            title = first_notice.get_text().strip()
-            href = first_notice.get("href")
-            
-            if href:
-                if href.startswith("http"):
-                    full_link = href
-                elif href.startswith("/"):
-                    full_link = "https://upbit.com" + href
-                else:
-                    full_link = "https://upbit.com/" + href
-                
-                return {"title": title, "link": full_link}
+        if not link_tag:
+            logging.warning("Не удалось найти элементы новостей на странице")
+            return None
         
-        logging.warning("Не удалось найти элементы новостей на странице")
-        return None
+        title_span = link_tag.select_one('span.css-qju2q6')
+        if title_span:
+            title = title_span.get_text(strip=True)
+        else:
+            title = link_tag.get_text(strip=True)
+        
+        href = link_tag.get('href')
+        
+        if not href:
+            logging.warning("Ссылка на новость не содержит атрибут href")
+            return None
+        
+        if href.startswith('http'):
+            full_link = href
+        else:
+            full_link = f"https://upbit.com{href}" if href.startswith('/') else f"https://upbit.com/{href}"
+        
+        logging.info(f"Найдена новость: {title[:50]}...")
+        
+        return {
+            "title": title,
+            "link": full_link
+        }
         
     except requests.exceptions.Timeout:
         logging.error("Таймаут при запросе к Upbit")
