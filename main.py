@@ -108,8 +108,21 @@ def fetch_latest_notice(driver, is_first_load=False):
         # Ищем первую НЕ закрепленную новость
         link_tag = None
         pinned_count = 0
-        for notice_link in all_notice_links:
+        for idx, notice_link in enumerate(all_notice_links):
             parent_tr = notice_link.find_parent('tr')
+            
+            # ОТЛАДКА: Показываем первые 5 новостей при первой загрузке
+            if is_first_load and idx < 5:
+                title_preview = notice_link.get_text(strip=True)[:40]
+                if parent_tr:
+                    is_fixed = parent_tr.get('data-isfixed')
+                    # Показываем ВСЕ атрибуты элемента <tr>
+                    all_attrs = dict(parent_tr.attrs) if parent_tr.attrs else {}
+                    logging.info(f"DEBUG #{idx+1}: '{title_preview}'")
+                    logging.info(f"  → data-isfixed = '{is_fixed}'")
+                    logging.info(f"  → Все атрибуты <tr>: {all_attrs}")
+                else:
+                    logging.info(f"DEBUG #{idx+1}: '{title_preview}' | parent_tr НЕ НАЙДЕН")
             
             # Проверяем что родительский <tr> НЕ имеет data-isfixed="true"
             if parent_tr:
