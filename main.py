@@ -48,7 +48,7 @@ def init_driver():
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
         
-        logging.info("✅ Браузер Chrome запущен и готов к работе")
+        logging.info("✅ Браузер Chrome запущен в оптимизированном режиме")
         return driver
         
     except Exception as e:
@@ -100,18 +100,31 @@ def fetch_latest_notice(driver, is_first_load=False):
             logging.warning("⚠️ Не удалось найти элементы новостей на странице")
             return None
         
+        # Если первая загрузка - показываем статистику
+        if is_first_load:
+            total_notices = len(all_notice_links)
+            logging.info(f"🔍 Найдено новостей на странице: {total_notices}")
+        
         # Ищем первую НЕ закрепленную новость
         link_tag = None
+        pinned_count = 0
         for notice_link in all_notice_links:
             parent_tr = notice_link.find_parent('tr')
             
             # Проверяем что родительский <tr> НЕ имеет data-isfixed="true"
             if parent_tr:
                 is_fixed = parent_tr.get('data-isfixed')
-                if is_fixed != 'true':
+                if is_fixed == 'true':
+                    pinned_count += 1
+                    continue
+                else:
                     # Нашли первую незакрепленную новость!
                     link_tag = notice_link
                     break
+        
+        # Если первая загрузка и были закреплённые - сообщаем
+        if is_first_load and pinned_count > 0:
+            logging.info(f"⏭️  Пропущено закреплённых (data-isfixed=\"true\"): {pinned_count}")
         
         if not link_tag:
             logging.warning("⚠️ Все новости закреплены, реальных новостей не найдено")
@@ -137,16 +150,13 @@ def fetch_latest_notice(driver, is_first_load=False):
         else:
             full_link = f"https://upbit.com{href}" if href.startswith('/') else f"https://upbit.com/{href}"
         
-        if is_first_load:
-            logging.info(f"✅ Начинаем мониторинг с новости: {title[:50]}...")
-        
         return {
             "title": title,
             "link": full_link
         }
         
     except Exception as e:
-        logging.error(f"Ошибка при получении новостей: {e}")
+        logging.error(f"❌ Ошибка при получении новостей: {e}")
         return None
 
 
@@ -197,12 +207,10 @@ def send_telegram_notification(title, link):
     try:
         response = requests.post(api_url, json=data, timeout=10)
         
-        if response.status_code == 200:
-            logging.info(f"Уведомление отправлено: {title}")
-        else:
-            logging.error(f"Ошибка отправки в Telegram: {response.text}")
+        if response.status_code != 200:
+            logging.error(f"❌ Ошибка отправки в Telegram: {response.text}")
     except requests.exceptions.RequestException as e:
-        logging.error(f"Ошибка при отправке в Telegram: {e}")
+        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
 
 
 def main():
@@ -216,6 +224,7 @@ def main():
         return
     
     is_first_check = True
+    check_count = 0
     
     try:
         while True:
@@ -231,13 +240,27 @@ def main():
                 # При первой загрузке - просто сохраняем текущую новость
                 if is_first_check:
                     save_last_notice(notice["link"])
+                    logging.info(f"✅ Начинаем мониторинг с новости: {notice['title'][:50]}...")
                     logging.info("👀 Ожидаем появления новых уведомлений...")
                     is_first_check = False
                 # При последующих проверках - отправляем уведомление если новость изменилась
                 elif is_new_notice(notice["link"]):
+                    logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
+                    logging.info(f"🔗 Ссылка: {notice['link']}")
                     save_last_notice(notice["link"])
                     send_telegram_notification(notice["title"], notice["link"])
-                    logging.info(f"🔔 Обнаружена НОВАЯ новость: {notice['title']}")
+                    logging.info("📤 Уведомление отправлено в Telegram")
+                    logging.info("👀 Продолжаем мониторинг...")
+                
+                # Увеличиваем счётчик проверок
+                check_count += 1
+                
+                # Каждые 50-100 проверок делаем дополнительную паузу
+                if check_count % random.randint(50, 100) == 0:
+                    pause = random.uniform(3, 7)
+                    logging.info(f"💤 Профилактическая пауза {pause:.1f} сек (защита от блокировок)")
+                    time.sleep(pause)
+                    check_count = 0
                 
                 # Случайная задержка 1.0-1.5 секунд
                 time.sleep(random.uniform(1.0, 1.5))
