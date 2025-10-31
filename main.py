@@ -1,7 +1,7 @@
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 import re
 
 import requests
@@ -63,92 +63,6 @@ def init_driver():
         return None
 
 
-def parse_publish_time(time_str):
-    """
-    Парсит время публикации с сайта Upbit
-    Примеры форматов: "2025.10.31 10:25", "10:25", "2025.10.31"
-    """
-    try:
-        if not time_str:
-            logging.error("[parse_publish_time] time_str пустой")
-            return None
-        
-        time_str = time_str.strip()
-        logging.info(f"[parse_publish_time] Обрабатываем: '{time_str}'")
-        
-        # Формат 1: "2025.10.31 10:25" или "2025.10.31 10:25:43" (дата + время)
-        if '.' in time_str and ' ' in time_str:
-            try:
-                result = datetime.strptime(time_str, "%Y.%m.%d %H:%M")
-                logging.info(f"[parse_publish_time] ✅ Формат 1 (дата+время): {result}")
-                return result
-            except ValueError:
-                try:
-                    result = datetime.strptime(time_str, "%Y.%m.%d %H:%M:%S")
-                    logging.info(f"[parse_publish_time] ✅ Формат 1 (дата+время с секундами): {result}")
-                    return result
-                except ValueError:
-                    pass
-        
-        # Формат 1б: "2025-10-31 10:25" или "2025-10-31 10:25:43" (дата + время с дефисами)
-        if '-' in time_str and ' ' in time_str:
-            try:
-                result = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
-                logging.info(f"[parse_publish_time] ✅ Формат 1б (дата-время): {result}")
-                return result
-            except ValueError:
-                try:
-                    result = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
-                    logging.info(f"[parse_publish_time] ✅ Формат 1б (дата-время с секундами): {result}")
-                    return result
-                except ValueError:
-                    pass
-        
-        # Формат 2: "2025.10.31" (только дата)
-        if '.' in time_str and len(time_str) == 10:
-            try:
-                result = datetime.strptime(time_str, "%Y.%m.%d")
-                logging.info(f"[parse_publish_time] ✅ Формат 2 (дата): {result}")
-                return result
-            except ValueError:
-                pass
-        
-        # Формат 2б: "2025-10-31" (только дата с дефисами)
-        if '-' in time_str and len(time_str) == 10:
-            try:
-                result = datetime.strptime(time_str, "%Y-%m-%d")
-                logging.info(f"[parse_publish_time] ✅ Формат 2б (дата): {result}")
-                return result
-            except ValueError:
-                pass
-        
-        # Формат 3: "10:25" или "10:25:43" (только время)
-        if ':' in time_str and len(time_str) <= 8:
-            now = datetime.now()
-            try:
-                time_part = datetime.strptime(time_str, "%H:%M")
-                result = datetime(now.year, now.month, now.day, time_part.hour, time_part.minute)
-                logging.info(f"[parse_publish_time] ✅ Формат 3 (время): {result}")
-                return result
-            except ValueError:
-                try:
-                    time_part = datetime.strptime(time_str, "%H:%M:%S")
-                    result = datetime(now.year, now.month, now.day, time_part.hour, time_part.minute, time_part.second)
-                    logging.info(f"[parse_publish_time] ✅ Формат 3 (время с секундами): {result}")
-                    return result
-                except ValueError:
-                    pass
-        
-        logging.error(f"[parse_publish_time] ❌ Неизвестный формат: '{time_str}'")
-        return None
-            
-    except Exception as e:
-        logging.error(f"[parse_publish_time] ❌ Ошибка парсинга '{time_str}': {e}")
-        import traceback
-        logging.error(traceback.format_exc())
-        return None
-
-
 def extract_latest_notice_from_soup(soup, *, log_context="", log_stats=False):
     prefix = f"[{log_context}] " if log_context else ""
 
@@ -206,41 +120,9 @@ def extract_latest_notice_from_soup(soup, *, log_context="", log_stats=False):
     else:
         full_link = f"https://upbit.com{href}" if href.startswith('/') else f"https://upbit.com/{href}"
 
-    publish_time = None
-    if selected_tr:
-        time_selectors = [
-            'td.css-1w62z3d',
-            'td.css-1vopgf5',
-            'td.css-1i0gn2z',
-            'td:nth-of-type(3)',
-            'span.css-1w62z3d',
-        ]
-
-        for selector in time_selectors:
-            time_elem = selected_tr.select_one(selector)
-            if not time_elem:
-                continue
-
-            publish_time_str = time_elem.get_text(strip=True)
-            if not publish_time_str:
-                continue
-
-            parsed_time = parse_publish_time(publish_time_str)
-            if parsed_time:
-                publish_time = parsed_time
-                break
-
-        if publish_time is None:
-            time_cells = selected_tr.find_all('td')
-            if time_cells:
-                candidate_text = time_cells[-1].get_text(strip=True)
-                if candidate_text and candidate_text != title:
-                    publish_time = parse_publish_time(candidate_text)
-
     return {
         "title": title,
         "link": full_link,
-        "publish_time": publish_time,
     }
 
 
@@ -299,37 +181,7 @@ def fetch_latest_notice_js_polling(driver, is_first_load=False):
 
             const href = link.getAttribute('href') || '';
 
-            // ОТЛАДКА: Пробуем разные селекторы для времени
-            let publishTime = null;
-            
-            // Вариант 1: Проверенные CSS селекторы
-            let timeCell = tr.querySelector('td.css-1w62z3d');
-            if (timeCell) {
-                publishTime = timeCell.textContent.trim();
-            }
-            
-            // Вариант 2: Ищем любой td с датой
-            if (!publishTime) {
-                const allTds = tr.querySelectorAll('td');
-                for (let td of allTds) {
-                    const text = td.textContent.trim();
-                    // Проверяем формат даты: "2025.10.31" или "10:25"
-                    if (text.match(/\\d{4}\\.\\d{2}\\.\\d{2}/) || text.match(/\\d{2}:\\d{2}/)) {
-                        publishTime = text;
-                        break;
-                    }
-                }
-            }
-            
-            // Вариант 3: Последний td (обычно там время)
-            if (!publishTime) {
-                const allTds = tr.querySelectorAll('td');
-                if (allTds.length > 0) {
-                    publishTime = allTds[allTds.length - 1].textContent.trim();
-                }
-            }
-
-            return { title, href, publishTime };
+            return { title, href };
         }
         return null;
         """
@@ -342,7 +194,6 @@ def fetch_latest_notice_js_polling(driver, is_first_load=False):
 
         href = (result.get("href") or "").strip()
         title = (result.get("title") or "").strip()
-        publish_time_raw = (result.get("publishTime") or "").strip()
 
         if not href:
             logging.warning("[JS Polling] Получена пустая ссылка на новость")
@@ -355,8 +206,6 @@ def fetch_latest_notice_js_polling(driver, is_first_load=False):
         else:
             full_link = f"https://upbit.com/{href}"
 
-        publish_time = parse_publish_time(publish_time_raw) if publish_time_raw else None
-
         elapsed = time.time() - start_time
         if elapsed > 0.5:
             logging.warning(f"⚠️ Медленная JS проверка: {elapsed:.3f} сек")
@@ -364,7 +213,6 @@ def fetch_latest_notice_js_polling(driver, is_first_load=False):
         notice = {
             "title": title or full_link,
             "link": full_link,
-            "publish_time": publish_time,
             "check_time": elapsed,
             "source": "selenium-js",
         }
@@ -500,42 +348,7 @@ def fetch_latest_notice_instant(driver):
             const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
             const href = link.getAttribute('href');
             
-            // ОТЛАДКА: Пробуем разные селекторы для времени
-            let publishTime = null;
-            
-            // Вариант 1: td.css-1w62z3d
-            let timeCell = tr.querySelector('td.css-1w62z3d');
-            if (timeCell) {
-                publishTime = timeCell.textContent.trim();
-                console.log('[DEBUG] Время найдено (css-1w62z3d):', publishTime);
-            }
-            
-            // Вариант 2: Ищем любой td с датой
-            if (!publishTime) {
-                const allTds = tr.querySelectorAll('td');
-                for (let td of allTds) {
-                    const text = td.textContent.trim();
-                    // Проверяем формат даты: "2025.10.31" или "10:25"
-                    if (text.match(/\\d{4}\\.\\d{2}\\.\\d{2}/) || text.match(/\\d{2}:\\d{2}/)) {
-                        publishTime = text;
-                        console.log('[DEBUG] Время найдено (поиск по паттерну):', publishTime);
-                        break;
-                    }
-                }
-            }
-            
-            // Вариант 3: Последний td (обычно там время)
-            if (!publishTime) {
-                const allTds = tr.querySelectorAll('td');
-                if (allTds.length > 0) {
-                    publishTime = allTds[allTds.length - 1].textContent.trim();
-                    console.log('[DEBUG] Время из последнего td:', publishTime);
-                }
-            }
-            
-            console.log('[DEBUG] Финальное время:', publishTime);
-            
-            return { title, href, publishTime };
+            return { title, href };
         }
     }
     return null;
@@ -548,47 +361,12 @@ def fetch_latest_notice_instant(driver):
             logging.warning("[fetch_latest_notice_instant] JavaScript не вернул результат")
             return None
         
-        # DEBUG: Показываем что пришло из JavaScript
-        logging.info(f"[DEBUG] JS вернул: title={result['title'][:30]}..., publishTime='{result.get('publishTime')}'")
-        
         href = result.get('href', '')
         full_link = f"https://upbit.com{href}" if href.startswith('/') else href
-        
-        publish_time = None
-        publish_time_str = result.get('publishTime')
-        
-        if publish_time_str:
-            logging.info(f"[DEBUG] Парсим время: '{publish_time_str}'")
-            publish_time = parse_publish_time(publish_time_str)
-            if publish_time:
-                logging.info(f"[DEBUG] ✅ Время распарсено: {publish_time}")
-            else:
-                logging.error(f"[DEBUG] ❌ Не удалось распарсить: '{publish_time_str}'")
-        else:
-            logging.error("[DEBUG] ❌ publishTime пустой!")
-        
-        # ОТЛАДКА: Сохраняем HTML первой строки для анализа
-        try:
-            first_row_html = driver.execute_script("""
-                const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-                if (links.length > 0) {
-                    const tr = links[0].closest('tr');
-                    return tr ? tr.outerHTML : null;
-                }
-                return null;
-            """)
-            
-            if first_row_html:
-                with open("debug_first_row.html", "w", encoding="utf-8") as f:
-                    f.write(first_row_html)
-                logging.info("[DEBUG] HTML первой строки сохранен в debug_first_row.html")
-        except Exception as e:
-            logging.warning(f"[DEBUG] Не удалось сохранить HTML: {e}")
         
         return {
             "title": result['title'],
             "link": full_link,
-            "publish_time": publish_time
         }
     except Exception as e:
         logging.error(f"❌ Ошибка получения новости: {e}")
@@ -646,10 +424,7 @@ def get_notice_by_id(driver, notice_id):
             const titleSpan = link.querySelector('span.css-qju2q6') || link.querySelector('span.css-twx20f');
             const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
             
-            const timeCell = tr.querySelector('td.css-1w62z3d');
-            const publishTime = timeCell ? timeCell.textContent.trim() : null;
-            
-            return {{ title, href, publishTime }};
+            return {{ title, href }};
         }}
     }}
     return null;
@@ -664,15 +439,10 @@ def get_notice_by_id(driver, notice_id):
         href = result['href']
         full_link = f"https://upbit.com{href}" if href.startswith('/') else href
         
-        publish_time = None
-        if result.get('publishTime'):
-            publish_time = parse_publish_time(result['publishTime'])
-        
         return {
             "id": notice_id,
             "title": result['title'],
-            "link": full_link,
-            "publish_time": publish_time
+            "link": full_link
         }
     except Exception as e:
         logging.error(f"[get_notice_by_id] Ошибка для ID {notice_id}: {e}")
@@ -744,7 +514,6 @@ def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between
         send_telegram_notification(
             notice["title"],
             notice["link"],
-            publish_time=notice.get("publish_time"),
             detection_time=detection_time
         )
         
@@ -801,7 +570,10 @@ def is_new_notice(current_link):
     return current_link != last_link
 
 
-def send_telegram_notification(title, link, publish_time=None, detection_time=None):
+def send_telegram_notification(title, link, detection_time=None):
+    """
+    Отправляет уведомление в Telegram с точными метриками времени
+    """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
         return
@@ -817,7 +589,7 @@ def send_telegram_notification(title, link, publish_time=None, detection_time=No
 
 """
     
-    # РЕАЛЬНАЯ задержка бота (от обнаружения до отправки)
+    # ТОЧНЫЕ метрики времени
     if detection_time:
         bot_latency = (send_time - detection_time).total_seconds()
         
@@ -842,11 +614,6 @@ def send_telegram_notification(title, link, publish_time=None, detection_time=No
         # Если не передано время обнаружения
         send_str = send_time.strftime('%H:%M:%S.%f')[:-3]
         message += f"📤 <b>Отправлено:</b> {send_str}"
-    
-    # Опционально: время с сайта (если есть)
-    if publish_time:
-        pub_str = publish_time.strftime('%H:%M')
-        message += f"\n\n<i>📅 Время на сайте: {pub_str}</i>"
     
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -916,7 +683,6 @@ def main():
             send_telegram_notification(
                 notice["title"],
                 notice["link"],
-                publish_time=notice.get("publish_time"),
                 detection_time=detection_start
             )
             telegram_sent = datetime.now()
