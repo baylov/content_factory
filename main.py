@@ -367,6 +367,139 @@ def fetch_latest_notice_smart_refresh(driver, *, is_first_load=False, force_refr
         return None
 
 
+def setup_mutation_observer(driver):
+    """
+    Устанавливает JavaScript MutationObserver для мгновенного обнаружения новых новостей
+    """
+    js_code = """
+    // Сохраняем первую незакрепленную новость
+    window.lastNoticeHref = null;
+    window.noticeChanged = false;
+    
+    function getFirstUnpinnedNotice() {
+        const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
+        
+        for (let link of links) {
+            const tr = link.closest('tr');
+            if (!tr) continue;
+            
+            const noticeMarker = tr.querySelector('span.css-1y508v5');
+            const isNotice = noticeMarker && noticeMarker.textContent.trim() === '공지';
+            
+            const pinMarker = tr.querySelector('use[href="#N_pin_fill_24"]');
+            const isPinned = pinMarker !== null;
+            
+            if (!isNotice && !isPinned) {
+                return link.getAttribute('href');
+            }
+        }
+        return null;
+    }
+    
+    // Инициализация
+    window.lastNoticeHref = getFirstUnpinnedNotice();
+    
+    // Наблюдатель за изменениями
+    const observer = new MutationObserver(function(mutations) {
+        const currentHref = getFirstUnpinnedNotice();
+        if (currentHref && currentHref !== window.lastNoticeHref) {
+            window.noticeChanged = true;
+            window.lastNoticeHref = currentHref;
+        }
+    });
+    
+    // Наблюдаем за таблицей новостей
+    const table = document.querySelector('table');
+    if (table) {
+        observer.observe(table, {
+            childList: true,
+            subtree: true
+        });
+    }
+    
+    return true;
+    """
+    
+    try:
+        driver.execute_script(js_code)
+        logging.info("✅ MutationObserver установлен")
+        return True
+    except Exception as e:
+        logging.error(f"❌ Ошибка установки MutationObserver: {e}")
+        return False
+
+
+def check_for_changes(driver):
+    """
+    Проверяет был ли обнаружен MutationObserver изменения
+    МГНОВЕННО (без refresh, без парсинга)
+    """
+    try:
+        result = driver.execute_script("return window.noticeChanged;")
+        
+        if result:
+            # Сбрасываем флаг
+            driver.execute_script("window.noticeChanged = false;")
+            return True
+        
+        return False
+    except:
+        return False
+
+
+def fetch_latest_notice_instant(driver):
+    """
+    Получает данные новости после обнаружения изменений
+    """
+    js_code = """
+    const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
+    
+    for (let link of links) {
+        const tr = link.closest('tr');
+        if (!tr) continue;
+        
+        const noticeMarker = tr.querySelector('span.css-1y508v5');
+        const isNotice = noticeMarker && noticeMarker.textContent.trim() === '공지';
+        
+        const pinMarker = tr.querySelector('use[href="#N_pin_fill_24"]');
+        const isPinned = pinMarker !== null;
+        
+        if (!isNotice && !isPinned) {
+            const titleSpan = link.querySelector('span.css-qju2q6');
+            const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
+            const href = link.getAttribute('href');
+            const timeCell = tr.querySelector('td.css-1w62z3d, td.css-1vopgf5, td.css-1i0gn2z, td:nth-of-type(3), span.css-1w62z3d');
+            const publishTime = timeCell ? timeCell.textContent.trim() : null;
+            
+            return { title, href, publishTime };
+        }
+    }
+    return null;
+    """
+    
+    try:
+        result = driver.execute_script(js_code)
+        
+        if not result:
+            return None
+        
+        href = result.get('href', '')
+        full_link = f"https://upbit.com{href}" if href.startswith('/') else href
+        
+        publish_time = None
+        if result.get('publishTime'):
+            publish_time = parse_publish_time(result['publishTime'])
+        
+        return {
+            "title": result['title'],
+            "link": full_link,
+            "publish_time": publish_time
+        }
+    except Exception as e:
+        logging.error(f"❌ Ошибка получения новости: {e}")
+        return None
+
+
 def read_last_notice():
     try:
         if os.path.exists(LAST_NOTICE_FILE):
@@ -466,7 +599,7 @@ def send_telegram_notification(title, link, publish_time=None):
 
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: Selenium с JavaScript polling")
+    logging.info("📡 Режим: MutationObserver (мгновенное обнаружение)")
 
     driver = init_driver()
 
@@ -474,77 +607,97 @@ def main():
         logging.error("❌ Не удалось запустить браузер")
         return
 
-    is_first_check = True
-    check_count = 0
-    refresh_interval = 10
-
     try:
+        # Первая загрузка
+        logging.info("📡 Подключаемся к Upbit...")
+        driver.get(UPBIT_NOTICE_URL)
+        wait = WebDriverWait(driver, 15)
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+        time.sleep(0.5)
+
+        # Получаем первую новость
+        notice = fetch_latest_notice_instant(driver)
+        if notice:
+            logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
+            logging.info(f"🔗 Ссылка: {notice['link']}")
+            
+            if notice.get('publish_time'):
+                pub_time_str = notice['publish_time'].strftime('%Y-%m-%d %H:%M:%S')
+                logging.info(f"⏰ Время публикации: {pub_time_str}")
+            
+            save_last_notice(notice["link"])
+            send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
+            logging.info("✅ Начинаем мониторинг...")
+        else:
+            logging.error("❌ Не удалось получить первую новость")
+            return
+
+        # Устанавливаем MutationObserver
+        if not setup_mutation_observer(driver):
+            logging.error("❌ Не удалось установить MutationObserver")
+            return
+
+        check_count = 0
+        refresh_interval = 300  # Refresh каждые 300 проверок (~30 секунд при проверке каждые 0.1 сек)
+
         while True:
             try:
-                force_refresh = (check_count % refresh_interval == 0) and not is_first_check
+                # Периодический refresh для обновления с сервера
+                if check_count > 0 and check_count % refresh_interval == 0:
+                    logging.info(f"🔄 Плановый refresh (каждые {refresh_interval} проверок)...")
+                    driver.refresh()
+                    wait = WebDriverWait(driver, 10)
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+                    time.sleep(0.3)
 
-                if force_refresh:
-                    logging.info("🔄 Плановый refresh страницы...")
+                    # Переустанавливаем observer после refresh
+                    setup_mutation_observer(driver)
 
-                notice = fetch_latest_notice_smart_refresh(
-                    driver,
-                    is_first_load=is_first_check,
-                    force_refresh=force_refresh
-                )
+                # МГНОВЕННАЯ проверка через MutationObserver
+                if check_for_changes(driver):
+                    # Обнаружено изменение!
+                    notice = fetch_latest_notice_instant(driver)
 
-                if notice is None:
-                    logging.warning("⚠️ Ошибка получения новости")
-                    time.sleep(2)
-                    continue
+                    if notice and is_new_notice(notice["link"]):
+                        logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
+                        logging.info(f"🔗 Ссылка: {notice['link']}")
+                        logging.info("⚡ Обнаружено мгновенно через MutationObserver!")
 
-                check_time = notice.get('check_time')
-                if check_time is not None and (is_first_check or force_refresh):
-                    logging.info(f"⏱️ Проверка заняла {check_time:.3f} сек")
+                        save_last_notice(notice["link"])
+                        send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
 
-                if is_first_check:
-                    logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
-                    logging.info(f"🔗 Ссылка: {notice['link']}")
-
-                    if notice.get('publish_time'):
-                        pub_time_str = notice['publish_time'].strftime('%Y-%m-%d %H:%M:%S')
-                        logging.info(f"⏰ Время публикации: {pub_time_str}")
-
-                    save_last_notice(notice["link"])
-                    send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
-                    logging.info("✅ Начинаем мониторинг. Ожидаем новых уведомлений...")
-                    is_first_check = False
-
-                elif is_new_notice(notice["link"]):
-                    logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
-                    logging.info(f"🔗 Ссылка: {notice['link']}")
-
-                    save_last_notice(notice["link"])
-                    send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
-
-                    logging.info("👀 Продолжаем мониторинг...")
+                        logging.info("👀 Продолжаем мониторинг...")
 
                 check_count += 1
 
-                time.sleep(0.3)
+                # ОЧЕНЬ БЫСТРАЯ проверка (0.1 сек достаточно для MutationObserver)
+                time.sleep(0.1)
 
             except Exception as exc:
                 error_type = type(exc).__name__
-                logging.error(f"❌ Ошибка в цикле ({error_type}): {exc}")
+                logging.error(f"❌ Ошибка ({error_type}): {exc}")
 
                 if 'session' in str(exc).lower():
-                    logging.warning("⚠️ Потеря сессии, переинициализация...")
+                    logging.warning("⚠️ Переинициализация...")
                     try:
                         driver.quit()
                     except Exception:
                         pass
 
                     driver = init_driver()
-                    if driver:
-                        logging.info("✅ Браузер переинициализирован")
-                        is_first_check = True
+                    if not driver:
+                        break
+
+                    # Полная переинициализация
+                    try:
+                        driver.get(UPBIT_NOTICE_URL)
+                        wait = WebDriverWait(driver, 15)
+                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+                        setup_mutation_observer(driver)
                         check_count = 0
-                    else:
-                        logging.error("❌ Не удалось переинициализировать")
+                        logging.info("✅ Браузер переинициализирован")
+                    except Exception as reinit_exc:
+                        logging.error(f"❌ Не удалось переинициализировать: {reinit_exc}")
                         break
 
                 time.sleep(5)
