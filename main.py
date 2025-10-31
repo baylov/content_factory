@@ -667,7 +667,15 @@ def send_telegram_notification(title, link, publish_time=None):
                 delay_value = abs(delay_value)
 
         publish_str = effective_publish_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        delay_indicator = "✅" if delay_value <= 1.0 else "⚠️"
+        
+        # Статус задержки
+        if delay_value < 1.0:
+            delay_indicator = "✅"  # Отлично - цель достигнута
+        elif delay_value < 2.0:
+            delay_indicator = "⚠️"  # Хорошо, но можно лучше
+        else:
+            delay_indicator = "❌"  # Медленно - нужна оптимизация
+        
         delay_text = f"\n⚡ <b>Задержка:</b> {delay_value:.3f} сек {delay_indicator}"
     else:
         publish_str = "неизвестно"
@@ -678,10 +686,7 @@ def send_telegram_notification(title, link, publish_time=None):
     logging.info(f"⏰ Время публикации: {publish_str}")
     logging.info(f"📤 Время обнаружения: {detection_str}")
     if delay_value is not None:
-        if delay_value > 1.0:
-            logging.warning(f"⚠️ ЗАДЕРЖКА ПРЕВЫШЕНА: {delay_value:.3f} сек (цель: < 1 сек)")
-        else:
-            logging.info(f"⚡ Задержка: {delay_value:.3f} сек ✅")
+        logging.info(f"⚡ Задержка: {delay_value:.3f} сек {delay_indicator}")
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
