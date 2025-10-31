@@ -118,11 +118,16 @@ def fetch_latest_notice(driver, is_first_load=False):
             parent_tr = notice_link.find_parent('tr')
 
             if parent_tr:
-                # Проверяем наличие маркера закрепленной новости: <span class="css-1y508v5">공지</span>
-                pinned_marker = parent_tr.select_one('span.css-1y508v5')
+                # Проверка 1: Маркер объявления "공지" (notice)
+                notice_marker = parent_tr.select_one('span.css-1y508v5')
+                is_notice = notice_marker and notice_marker.get_text(strip=True) == '공지'
 
-                # Если маркер есть и содержит текст "공지" - это закрепленная новость
-                if pinned_marker and pinned_marker.get_text(strip=True) == '공지':
+                # Проверка 2: Иконка закрепления (pin)
+                pin_marker = parent_tr.select_one('use[href="#N_pin_fill_24"]')
+                is_pinned = pin_marker is not None
+
+                # Если любой из маркеров найден - пропускаем
+                if is_notice or is_pinned:
                     pinned_count += 1
                     continue
                 else:
