@@ -653,15 +653,10 @@ def send_telegram_notification(title, link, publish_time=None, detection_time=No
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
         return
-
-    # Используем переданное время или текущее
-    if detection_time is None:
-        detection_time = datetime.now()
-
-    if publish_time and not isinstance(publish_time, datetime):
-        logging.warning("⚠️ Время публикации передано в неподдерживаемом формате")
-        publish_time = None
-
+    
+    # Момент отправки
+    send_time = datetime.now()
+    
     # Базовое сообщение
     message = f"""🔔 <b>Новое уведомление на Upbit!</b>
 
@@ -670,50 +665,51 @@ def send_telegram_notification(title, link, publish_time=None, detection_time=No
 
 """
     
-    # ГАРАНТИРОВАННО показываем время обнаружения
-    det_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-    message += f"📤 <b>Обнаружено:</b> {det_str}\n"
-    
-    # Если есть время публикации - добавляем его и задержку
-    if publish_time:
-        effective_publish_time = publish_time
-        delay_value = (detection_time - effective_publish_time).total_seconds()
-
-        if delay_value < 0:
-            if abs(delay_value) > 12 * 3600:
-                logging.warning("⚠️ Время публикации позже времени обнаружения. Корректируем на предыдущий день.")
-                effective_publish_time = publish_time - timedelta(days=1)
-                delay_value = (detection_time - effective_publish_time).total_seconds()
-            else:
-                logging.warning("⚠️ Вычисленная задержка получилась отрицательной, берём абсолютное значение")
-                delay_value = abs(delay_value)
-
-        pub_str = effective_publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    # РЕАЛЬНАЯ задержка бота (от обнаружения до отправки)
+    if detection_time:
+        bot_latency = (send_time - detection_time).total_seconds()
         
-        if delay_value < 1.0:
-            delay_status = "✅"
-        elif delay_value < 2.0:
-            delay_status = "⚠️"
+        # Форматируем времена
+        detection_str = detection_time.strftime('%H:%M:%S.%f')[:-3]
+        send_str = send_time.strftime('%H:%M:%S.%f')[:-3]
+        
+        # Статус задержки
+        if bot_latency < 0.5:
+            status = "✅"
+        elif bot_latency < 1.0:
+            status = "✅"
+        elif bot_latency < 2.0:
+            status = "⚠️"
         else:
-            delay_status = "❌"
+            status = "❌"
         
-        message += f"⏰ <b>Опубликовано:</b> {pub_str}\n"
-        message += f"⚡ <b>Задержка:</b> {delay_value:.3f} сек {delay_status}"
+        message += f"""⏱️ <b>Обнаружено:</b> {detection_str}
+📤 <b>Отправлено:</b> {send_str}
+⚡ <b>Задержка бота:</b> {bot_latency:.3f} сек {status}"""
     else:
-        message += "⏰ <b>Опубликовано:</b> неизвестно"
-
+        # Если не передано время обнаружения
+        send_str = send_time.strftime('%H:%M:%S.%f')[:-3]
+        message += f"📤 <b>Отправлено:</b> {send_str}"
+    
+    # Опционально: время с сайта (если есть)
+    if publish_time:
+        pub_str = publish_time.strftime('%H:%M')
+        message += f"\n\n<i>📅 Время на сайте: {pub_str}</i>"
+    
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
+    
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
-
+    
     try:
         response = requests.post(api_url, json=data, timeout=10)
-
-        if response.status_code != 200:
+        
+        if response.status_code == 200:
+            logging.info("✅ Уведомление отправлено в Telegram")
+        else:
             logging.error(f"❌ Ошибка отправки в Telegram: {response.text}")
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ Ошибка отправки в Telegram: {e}")
@@ -740,28 +736,45 @@ def main():
         # Получаем первую новость
         notice = fetch_latest_notice_instant(driver)
         if notice:
-            # Фиксируем время обнаружения при старте
-            detection_time = datetime.now()
-            detection_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            # ⏱️ ЗАСЕКАЕМ МОМЕНТ ОБНАРУЖЕНИЯ
+            detection_start = datetime.now()
             
             logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
             logging.info(f"🔗 Ссылка: {notice['link']}")
-            logging.info(f"📤 Обнаружено: {detection_str}")
             
-            publish_time = notice.get('publish_time')
-            if publish_time:
-                pub_time_str = publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                delay = (detection_time - publish_time).total_seconds()
-                logging.info(f"⏰ Время публикации: {pub_time_str}")
-                logging.info(f"⚡ Задержка: {delay:.3f} сек")
-            
+            # Сохраняем и отправляем
             save_last_notice(notice["link"])
             send_telegram_notification(
                 notice["title"], 
                 notice["link"], 
-                publish_time=publish_time,
-                detection_time=detection_time
+                publish_time=notice.get('publish_time'),
+                detection_time=detection_start
             )
+            
+            # ⏱️ ЗАСЕКАЕМ МОМЕНТ ПОСЛЕ ОТПРАВКИ
+            telegram_sent = datetime.now()
+            
+            # РЕАЛЬНАЯ задержка бота (от обнаружения до отправки)
+            bot_latency = (telegram_sent - detection_start).total_seconds()
+            
+            # Форматируем времена
+            detection_str = detection_start.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            sent_str = telegram_sent.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            
+            logging.info(f"⏱️ Обнаружено: {detection_str}")
+            logging.info(f"📤 Отправлено: {sent_str}")
+            logging.info(f"⚡ Задержка бота: {bot_latency:.3f} сек")
+            
+            # Оценка производительности
+            if bot_latency < 0.5:
+                logging.info("✅ ОТЛИЧНО: Задержка < 0.5 сек")
+            elif bot_latency < 1.0:
+                logging.info("✅ ХОРОШО: Задержка < 1 сек")
+            elif bot_latency < 2.0:
+                logging.warning("⚠️ ПРИЕМЛЕМО: Задержка 1-2 сек")
+            else:
+                logging.error(f"❌ МЕДЛЕННО: Задержка {bot_latency:.3f} сек!")
+            
             logging.info("✅ Начинаем мониторинг...")
         else:
             logging.error("❌ Не удалось получить первую новость")
@@ -791,50 +804,48 @@ def main():
 
                 # МГНОВЕННАЯ проверка через MutationObserver
                 if check_for_changes(driver):
-                    # Обнаружено изменение!
+                    # ⏱️ ЗАСЕКАЕМ МОМЕНТ ОБНАРУЖЕНИЯ
+                    detection_start = datetime.now()
+                    
                     notice = fetch_latest_notice_instant(driver)
 
                     if notice and is_new_notice(notice["link"]):
-                        # КРИТИЧНО: Фиксируем время обнаружения СРАЗУ
-                        detection_time = datetime.now()
-                        detection_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                        
                         logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
                         logging.info(f"🔗 Ссылка: {notice['link']}")
                         
-                        # ГАРАНТИРОВАННОЕ логирование времени обнаружения
-                        logging.info(f"📤 Обнаружено: {detection_str}")
-                        
-                        # Логируем время публикации и задержку если есть
-                        publish_time = notice.get("publish_time")
-                        if publish_time:
-                            publish_str = publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                            delay = (detection_time - publish_time).total_seconds()
-                            
-                            logging.info(f"⏰ Опубликовано: {publish_str}")
-                            logging.info(f"⚡ Задержка: {delay:.3f} сек")
-                            
-                            if delay < 1.0:
-                                logging.info("✅ ОТЛИЧНО: Задержка < 1 сек")
-                            elif delay < 2.0:
-                                logging.warning("⚠️ ХОРОШО: Задержка 1-2 сек")
-                            else:
-                                logging.error(f"❌ МЕДЛЕННО: Задержка {delay:.3f} сек!")
-                        else:
-                            logging.warning("⚠️ Время публикации не извлечено")
-                        
-                        logging.info("📤 Обнаружено через MutationObserver")
-
+                        # Сохраняем и отправляем
                         save_last_notice(notice["link"])
-                        
-                        # Передаём detection_time в функцию
                         send_telegram_notification(
                             notice["title"], 
                             notice["link"], 
-                            publish_time=publish_time,
-                            detection_time=detection_time
+                            publish_time=notice.get("publish_time"),
+                            detection_time=detection_start
                         )
-
+                        
+                        # ⏱️ ЗАСЕКАЕМ МОМЕНТ ПОСЛЕ ОТПРАВКИ
+                        telegram_sent = datetime.now()
+                        
+                        # РЕАЛЬНАЯ задержка бота (от обнаружения до отправки)
+                        bot_latency = (telegram_sent - detection_start).total_seconds()
+                        
+                        # Форматируем времена
+                        detection_str = detection_start.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        sent_str = telegram_sent.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        
+                        logging.info(f"⏱️ Обнаружено: {detection_str}")
+                        logging.info(f"📤 Отправлено: {sent_str}")
+                        logging.info(f"⚡ Задержка бота: {bot_latency:.3f} сек")
+                        
+                        # Оценка производительности
+                        if bot_latency < 0.5:
+                            logging.info("✅ ОТЛИЧНО: Задержка < 0.5 сек")
+                        elif bot_latency < 1.0:
+                            logging.info("✅ ХОРОШО: Задержка < 1 сек")
+                        elif bot_latency < 2.0:
+                            logging.warning("⚠️ ПРИЕМЛЕМО: Задержка 1-2 сек")
+                        else:
+                            logging.error(f"❌ МЕДЛЕННО: Задержка {bot_latency:.3f} сек!")
+                        
                         logging.info("👀 Продолжаем мониторинг...")
 
                 check_count += 1
