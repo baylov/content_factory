@@ -93,12 +93,6 @@ def fetch_latest_notice(driver, is_first_load=False):
         page_source = driver.page_source
         soup = BeautifulSoup(page_source, 'html.parser')
         
-        # ОТЛАДКА: Сохраняем HTML при первой загрузке
-        if is_first_load:
-            with open("debug_upbit_page.html", "w", encoding="utf-8") as f:
-                f.write(page_source)
-            logging.info("🔍 DEBUG: HTML страницы сохранен в debug_upbit_page.html")
-        
         # Находим ВСЕ ссылки на новости
         all_notice_links = soup.select('tr a[href*="/service_center/notice"]')
         
