@@ -223,118 +223,148 @@ def extract_latest_notice_from_soup(soup, *, log_context="", log_stats=False):
     }
 
 
-def fetch_latest_notice_fast():
+def fetch_notice_from_page_source(driver, *, log_context="Selenium", log_stats=False):
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    return extract_latest_notice_from_soup(
+        soup,
+        log_context=log_context,
+        log_stats=log_stats,
+    )
+
+
+def fetch_latest_notice_js_polling(driver, is_first_load=False):
     """
-    Быстрая проверка через requests (без браузера).
+    Быстрая проверка через JavaScript polling (без полного refresh).
     """
     try:
         start_time = time.time()
 
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9,ko;q=0.8',
-        }
+        if is_first_load:
+            logging.info("📡 Подключаемся к Upbit (Selenium)...")
+            driver.get(UPBIT_NOTICE_URL)
+            wait = WebDriverWait(driver, 15)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+            time.sleep(0.3)
 
-        response = requests.get(UPBIT_NOTICE_URL, headers=headers, timeout=5)
-
-        if response.status_code != 200:
-            logging.warning(f"⚠️ Requests вернул статус {response.status_code}")
-            return None
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-        notice = extract_latest_notice_from_soup(soup, log_context="Requests")
-
-        if notice is None:
-            return None
-
-        elapsed = time.time() - start_time
-        notice["check_time"] = elapsed
-        notice["source"] = "requests"
-
-        if elapsed > 0.5:
-            logging.warning(f"⚠️ Медленная проверка (requests): {elapsed:.3f} сек")
-
-        return notice
-
-    except requests.exceptions.Timeout:
-        logging.warning("⚠️ Requests timeout")
-        return None
-    except requests.exceptions.RequestException as exc:
-        logging.warning(f"⚠️ Requests ошибка: {exc}")
-        return None
-    except Exception as exc:
-        logging.error(f"❌ Ошибка в fetch_latest_notice_fast: {exc}")
-        return None
-
-
-def fetch_latest_notice_selenium(driver, is_first_load=False):
-    """
-    Selenium версия (fallback для сложных случаев).
-    """
-    max_retries = 3
-    retry_count = 0
-    first_cycle = is_first_load
-
-    while retry_count < max_retries:
-        try:
-            start_time = time.time()
-
-            if first_cycle:
-                logging.info("📡 Подключаемся к Upbit (Selenium)...")
-                driver.get(UPBIT_NOTICE_URL)
-                wait = WebDriverWait(driver, 15)
-                wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                time.sleep(0.3)
-                first_cycle = False
-            else:
-                driver.refresh()
-
-                try:
-                    wait = WebDriverWait(driver, 10)
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                except Exception as exc:
-                    logging.warning(f"⚠️ Selenium timeout: {exc}")
-                    retry_count += 1
-                    if retry_count < max_retries:
-                        time.sleep(2)
-                        continue
-                    return None
-
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            notice = extract_latest_notice_from_soup(
-                soup,
-                log_context="Selenium",
-                log_stats=is_first_load and retry_count == 0,
-            )
-
+            notice = fetch_notice_from_page_source(driver, log_stats=True)
             if notice is None:
-                retry_count += 1
-                if retry_count < max_retries:
-                    logging.warning(f"⚠️ Не найдены новости, повтор {retry_count}/{max_retries}")
-                    time.sleep(2)
-                    continue
                 return None
 
             elapsed = time.time() - start_time
             notice["check_time"] = elapsed
-            notice["source"] = "selenium"
-
-            if elapsed > 1.5:
-                logging.warning(f"⚠️ Медленная проверка (Selenium): {elapsed:.3f} сек")
-
+            notice["source"] = "selenium-initial"
             return notice
 
-        except Exception as exc:
-            retry_count += 1
-            error_type = type(exc).__name__
-            logging.error(f"❌ Selenium ошибка (попытка {retry_count}/{max_retries}, {error_type}): {exc}")
-            if retry_count < max_retries:
-                time.sleep(3)
-            else:
+        js_code = """
+        const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
+        for (const link of links) {
+            const tr = link.closest('tr');
+            if (!tr) {
+                continue;
+            }
+
+            const noticeMarker = tr.querySelector('span.css-1y508v5');
+            const isNotice = noticeMarker && noticeMarker.textContent.trim() === '공지';
+
+            const pinMarker = tr.querySelector('use[href="#N_pin_fill_24"]');
+            const isPinned = pinMarker !== null;
+
+            if (isNotice || isPinned) {
+                continue;
+            }
+
+            const titleSpan = link.querySelector('span.css-qju2q6');
+            const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
+
+            const href = link.getAttribute('href') || '';
+
+            const timeCell = tr.querySelector('td.css-1w62z3d, td.css-1vopgf5, td.css-1i0gn2z, td:nth-of-type(3), span.css-1w62z3d');
+            const publishTime = timeCell ? timeCell.textContent.trim() : null;
+
+            return { title, href, publishTime };
+        }
+        return null;
+        """
+
+        result = driver.execute_script(js_code)
+
+        if not result:
+            logging.warning("[JS Polling] Не удалось получить новость")
+            return None
+
+        href = (result.get("href") or "").strip()
+        title = (result.get("title") or "").strip()
+        publish_time_raw = (result.get("publishTime") or "").strip()
+
+        if not href:
+            logging.warning("[JS Polling] Получена пустая ссылка на новость")
+            return None
+
+        if href.startswith("http"):
+            full_link = href
+        elif href.startswith("/"):
+            full_link = f"https://upbit.com{href}"
+        else:
+            full_link = f"https://upbit.com/{href}"
+
+        publish_time = parse_publish_time(publish_time_raw) if publish_time_raw else None
+
+        elapsed = time.time() - start_time
+        if elapsed > 0.5:
+            logging.warning(f"⚠️ Медленная JS проверка: {elapsed:.3f} сек")
+
+        notice = {
+            "title": title or full_link,
+            "link": full_link,
+            "publish_time": publish_time,
+            "check_time": elapsed,
+            "source": "selenium-js",
+        }
+
+        return notice
+
+    except Exception as exc:
+        logging.error(f"❌ Ошибка JS polling: {exc}")
+        return None
+
+
+def fetch_latest_notice_smart_refresh(driver, *, is_first_load=False, force_refresh=False):
+    """
+    Умная проверка:
+    - Полный refresh при первой загрузке или когда запрошен.
+    - Между ними — быстрая проверка через JavaScript.
+    """
+    try:
+        if is_first_load:
+            return fetch_latest_notice_js_polling(driver, is_first_load=True)
+
+        if force_refresh:
+            start_time = time.time()
+            driver.refresh()
+            wait = WebDriverWait(driver, 10)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+            time.sleep(0.2)
+
+            notice = fetch_notice_from_page_source(driver)
+            if notice is None:
                 return None
 
-    return None
+            elapsed = time.time() - start_time
+            notice["check_time"] = elapsed
+            notice["source"] = "selenium-refresh"
+            return notice
+
+        notice = fetch_latest_notice_js_polling(driver)
+
+        if notice is not None:
+            return notice
+
+        logging.warning("[JS Polling] Не удалось получить новость. Пробуем полный refresh.")
+        return fetch_latest_notice_smart_refresh(driver, is_first_load=False, force_refresh=True)
+
+    except Exception as exc:
+        logging.error(f"❌ Ошибка smart refresh: {exc}")
+        return None
 
 
 def read_last_notice():
@@ -436,154 +466,95 @@ def send_telegram_notification(title, link, publish_time=None):
 
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: быстрые проверки через requests")
+    logging.info("📡 Режим: Selenium с JavaScript polling")
 
-    use_requests = True
-    requests_fail_count = 0
-    max_requests_fails = 5
-    requests_retry_interval = 10
-    last_requests_attempt = 0.0
+    driver = init_driver()
 
-    driver = None
-    selenium_first_load = True
+    if not driver:
+        logging.error("❌ Не удалось запустить браузер")
+        return
 
     is_first_check = True
     check_count = 0
+    refresh_interval = 10
 
     try:
         while True:
             try:
-                notice = None
-                now_monotonic = time.monotonic()
+                force_refresh = (check_count % refresh_interval == 0) and not is_first_check
 
-                should_try_requests = use_requests or (
-                    not use_requests and (now_monotonic - last_requests_attempt) >= requests_retry_interval
+                if force_refresh:
+                    logging.info("🔄 Плановый refresh страницы...")
+
+                notice = fetch_latest_notice_smart_refresh(
+                    driver,
+                    is_first_load=is_first_check,
+                    force_refresh=force_refresh
                 )
 
-                if should_try_requests:
-                    if not use_requests:
-                        logging.info("♻️ Пробуем снова использовать requests...")
-                    last_requests_attempt = now_monotonic
-                    notice = fetch_latest_notice_fast()
-
-                    if notice is None:
-                        if use_requests:
-                            requests_fail_count += 1
-                            logging.warning(f"⚠️ Requests failed ({requests_fail_count}/{max_requests_fails})")
-
-                            if requests_fail_count >= max_requests_fails:
-                                logging.warning("⚠️ Слишком много ошибок requests, переключаемся на Selenium")
-                                use_requests = False
-                                requests_fail_count = 0
-
-                                if driver is None:
-                                    driver = init_driver()
-                                    if driver:
-                                        selenium_first_load = True
-                                    else:
-                                        logging.error("❌ Не удалось запустить Selenium")
-                                        time.sleep(10)
-                                        continue
-                        else:
-                            logging.warning("⚠️ Requests недоступен, используем Selenium")
-                    else:
-                        check_time = notice.get("check_time")
-                        if check_time is not None:
-                            logging.info(f"⏱️ Проверка (requests) заняла {check_time:.3f} сек")
-
-                        if not use_requests:
-                            logging.info("✅ Requests восстановлен, возвращаемся к быстрому режиму")
-
-                        use_requests = True
-                        requests_fail_count = 0
-
                 if notice is None:
-                    if driver is None:
-                        driver = init_driver()
-                        selenium_first_load = True
-                        if not driver:
-                            logging.error("❌ Не удалось запустить Selenium")
-                            time.sleep(10)
-                            continue
-
-                    notice = fetch_latest_notice_selenium(driver, is_first_load=selenium_first_load)
-
-                    if selenium_first_load:
-                        selenium_first_load = False
-
-                    if notice is None:
-                        logging.warning("⚠️ Ошибка получения новости (Selenium), повтор через 5 секунд...")
-                        time.sleep(5)
-                        continue
-
-                    check_time = notice.get("check_time")
-                    if check_time is not None:
-                        logging.info(f"⏱️ Проверка (Selenium) заняла {check_time:.3f} сек")
-
-                if notice is None:
-                    time.sleep(0.5)
+                    logging.warning("⚠️ Ошибка получения новости")
+                    time.sleep(2)
                     continue
+
+                check_time = notice.get('check_time')
+                if check_time is not None and (is_first_check or force_refresh):
+                    logging.info(f"⏱️ Проверка заняла {check_time:.3f} сек")
 
                 if is_first_check:
                     logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
                     logging.info(f"🔗 Ссылка: {notice['link']}")
+
+                    if notice.get('publish_time'):
+                        pub_time_str = notice['publish_time'].strftime('%Y-%m-%d %H:%M:%S')
+                        logging.info(f"⏰ Время публикации: {pub_time_str}")
+
                     save_last_notice(notice["link"])
-                    send_telegram_notification(
-                        notice["title"],
-                        notice["link"],
-                        notice.get("publish_time"),
-                    )
+                    send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
                     logging.info("✅ Начинаем мониторинг. Ожидаем новых уведомлений...")
                     is_first_check = False
+
                 elif is_new_notice(notice["link"]):
                     logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
                     logging.info(f"🔗 Ссылка: {notice['link']}")
+
                     save_last_notice(notice["link"])
-                    send_telegram_notification(
-                        notice["title"],
-                        notice["link"],
-                        notice.get("publish_time"),
-                    )
+                    send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
+
                     logging.info("👀 Продолжаем мониторинг...")
 
                 check_count += 1
-                if check_count % 200 == 0:
-                    pause = 1.0
-                    logging.info(f"💤 Профилактическая пауза {pause:.1f} сек (защита от блокировок)")
-                    time.sleep(pause)
-                    check_count = 0
 
                 time.sleep(0.3)
 
             except Exception as exc:
                 error_type = type(exc).__name__
-                logging.error(f"❌ Ошибка в цикле мониторинга ({error_type}): {exc}")
+                logging.error(f"❌ Ошибка в цикле ({error_type}): {exc}")
 
-                if driver and "session" in str(exc).lower():
-                    logging.warning("⚠️ Потеря сессии Selenium, переинициализация...")
+                if 'session' in str(exc).lower():
+                    logging.warning("⚠️ Потеря сессии, переинициализация...")
                     try:
                         driver.quit()
                     except Exception:
                         pass
 
                     driver = init_driver()
-                    selenium_first_load = True
-
                     if driver:
-                        logging.info("✅ Selenium переинициализирован")
+                        logging.info("✅ Браузер переинициализирован")
+                        is_first_check = True
+                        check_count = 0
                     else:
-                        logging.error("❌ Не удалось переинициализировать Selenium")
-                        use_requests = True
-                        requests_fail_count = 0
+                        logging.error("❌ Не удалось переинициализировать")
+                        break
 
                 time.sleep(5)
 
     except KeyboardInterrupt:
-        logging.info("⏹️ Получен сигнал остановки (Ctrl+C)")
+        logging.info("⏹️ Остановка (Ctrl+C)")
     finally:
         if driver:
             driver.quit()
-            logging.info("✅ Браузер закрыт. Бот остановлен.")
+            logging.info("✅ Браузер закрыт")
 
 
 if __name__ == "__main__":
