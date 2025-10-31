@@ -244,11 +244,14 @@ def main():
                     time.sleep(5)
                     continue
                 
-                # При первой загрузке - просто сохраняем текущую новость
+                # При первом запуске отправляем уведомление и сохраняем текущую новость
                 if is_first_check:
+                    logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
+                    logging.info(f"🔗 Ссылка: {notice['link']}")
                     save_last_notice(notice["link"])
-                    logging.info(f"✅ Начинаем мониторинг с новости: {notice['title'][:50]}...")
-                    logging.info("👀 Ожидаем появления новых уведомлений...")
+                    send_telegram_notification(notice["title"], notice["link"])
+                    logging.info("📤 Уведомление отправлено в Telegram")
+                    logging.info("✅ Начинаем мониторинг. Ожидаем новых уведомлений...")
                     is_first_check = False
                 # При последующих проверках - отправляем уведомление если новость изменилась
                 elif is_new_notice(notice["link"]):
