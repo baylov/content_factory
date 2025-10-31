@@ -3,3 +3,4 @@ logs/*.log
 __pycache__/
 *.pyc
 last_notice.txt
+debug_first_row.html

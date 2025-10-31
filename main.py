@@ -77,11 +77,15 @@ def parse_publish_time(time_str):
     - "10:25:43"
     """
     if not time_str:
+        logging.warning("[DEBUG parse_publish_time] time_str пустой")
         return None
 
     time_str = time_str.strip()
     if not time_str:
+        logging.warning("[DEBUG parse_publish_time] time_str пустой после strip()")
         return None
+
+    logging.info(f"[DEBUG parse_publish_time] Исходная строка: '{time_str}'")
 
     full_formats = [
         "%Y.%m.%d %H:%M",
@@ -93,14 +97,18 @@ def parse_publish_time(time_str):
     last_error = None
     for fmt in full_formats:
         try:
-            return datetime.strptime(time_str, fmt)
+            result = datetime.strptime(time_str, fmt)
+            logging.info(f"[DEBUG parse_publish_time] Формат дата+время ({fmt}): {result}")
+            return result
         except ValueError as exc:
             last_error = exc
 
     date_only_formats = ["%Y.%m.%d", "%Y-%m-%d"]
     for fmt in date_only_formats:
         try:
-            return datetime.strptime(time_str, fmt)
+            result = datetime.strptime(time_str, fmt)
+            logging.info(f"[DEBUG parse_publish_time] Формат только дата ({fmt}): {result}")
+            return result
         except ValueError as exc:
             last_error = exc
 
@@ -109,7 +117,7 @@ def parse_publish_time(time_str):
     for fmt in time_only_formats:
         try:
             time_part = datetime.strptime(time_str, fmt)
-            return datetime(
+            result = datetime(
                 now.year,
                 now.month,
                 now.day,
@@ -117,14 +125,18 @@ def parse_publish_time(time_str):
                 time_part.minute,
                 time_part.second,
             )
+            logging.info(f"[DEBUG parse_publish_time] Формат только время ({fmt}): {result}")
+            return result
         except ValueError as exc:
             last_error = exc
 
     if last_error:
-        logging.warning(f"⚠️ Не удалось распарсить время: {time_str} ({last_error})")
+        logging.warning(f"[DEBUG parse_publish_time] Не удалось распарсить время: '{time_str}' ({last_error})")
     else:
-        logging.warning(f"⚠️ Не удалось распарсить время: {time_str}")
+        logging.warning(f"[DEBUG parse_publish_time] Неизвестный формат: '{time_str}'")
 
+    import traceback
+    logging.error(traceback.format_exc())
     return None
 
 
@@ -278,8 +290,35 @@ def fetch_latest_notice_js_polling(driver, is_first_load=False):
 
             const href = link.getAttribute('href') || '';
 
-            const timeCell = tr.querySelector('td.css-1w62z3d, td.css-1vopgf5, td.css-1i0gn2z, td:nth-of-type(3), span.css-1w62z3d');
-            const publishTime = timeCell ? timeCell.textContent.trim() : null;
+            // ОТЛАДКА: Пробуем разные селекторы для времени
+            let publishTime = null;
+            
+            // Вариант 1: Проверенные CSS селекторы
+            let timeCell = tr.querySelector('td.css-1w62z3d');
+            if (timeCell) {
+                publishTime = timeCell.textContent.trim();
+            }
+            
+            // Вариант 2: Ищем любой td с датой
+            if (!publishTime) {
+                const allTds = tr.querySelectorAll('td');
+                for (let td of allTds) {
+                    const text = td.textContent.trim();
+                    // Проверяем формат даты: "2025.10.31" или "10:25"
+                    if (text.match(/\\d{4}\\.\\d{2}\\.\\d{2}/) || text.match(/\\d{2}:\\d{2}/)) {
+                        publishTime = text;
+                        break;
+                    }
+                }
+            }
+            
+            // Вариант 3: Последний td (обычно там время)
+            if (!publishTime) {
+                const allTds = tr.querySelectorAll('td');
+                if (allTds.length > 0) {
+                    publishTime = allTds[allTds.length - 1].textContent.trim();
+                }
+            }
 
             return { title, href, publishTime };
         }
@@ -398,11 +437,15 @@ def setup_mutation_observer(driver):
     
     // Инициализация
     window.lastNoticeHref = getFirstUnpinnedNotice();
+    console.log('[MutationObserver] Инициализация, первая новость:', window.lastNoticeHref);
     
     // Наблюдатель за изменениями
     const observer = new MutationObserver(function(mutations) {
         const currentHref = getFirstUnpinnedNotice();
         if (currentHref && currentHref !== window.lastNoticeHref) {
+            console.log('[MutationObserver] Обнаружено изменение!');
+            console.log('[MutationObserver] Было:', window.lastNoticeHref);
+            console.log('[MutationObserver] Стало:', currentHref);
             window.noticeChanged = true;
             window.lastNoticeHref = currentHref;
         }
@@ -415,6 +458,9 @@ def setup_mutation_observer(driver):
             childList: true,
             subtree: true
         });
+        console.log('[MutationObserver] Наблюдение установлено');
+    } else {
+        console.error('[MutationObserver] Таблица не найдена!');
     }
     
     return true;
@@ -468,8 +514,41 @@ def fetch_latest_notice_instant(driver):
             const titleSpan = link.querySelector('span.css-qju2q6');
             const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
             const href = link.getAttribute('href');
-            const timeCell = tr.querySelector('td.css-1w62z3d, td.css-1vopgf5, td.css-1i0gn2z, td:nth-of-type(3), span.css-1w62z3d');
-            const publishTime = timeCell ? timeCell.textContent.trim() : null;
+            
+            // ОТЛАДКА: Пробуем разные селекторы для времени
+            let publishTime = null;
+            
+            // Вариант 1: td.css-1w62z3d
+            let timeCell = tr.querySelector('td.css-1w62z3d');
+            if (timeCell) {
+                publishTime = timeCell.textContent.trim();
+                console.log('[DEBUG] Время найдено (css-1w62z3d):', publishTime);
+            }
+            
+            // Вариант 2: Ищем любой td с датой
+            if (!publishTime) {
+                const allTds = tr.querySelectorAll('td');
+                for (let td of allTds) {
+                    const text = td.textContent.trim();
+                    // Проверяем формат даты: "2025.10.31" или "10:25"
+                    if (text.match(/\\d{4}\\.\\d{2}\\.\\d{2}/) || text.match(/\\d{2}:\\d{2}/)) {
+                        publishTime = text;
+                        console.log('[DEBUG] Время найдено (поиск по паттерну):', publishTime);
+                        break;
+                    }
+                }
+            }
+            
+            // Вариант 3: Последний td (обычно там время)
+            if (!publishTime) {
+                const allTds = tr.querySelectorAll('td');
+                if (allTds.length > 0) {
+                    publishTime = allTds[allTds.length - 1].textContent.trim();
+                    console.log('[DEBUG] Время из последнего td:', publishTime);
+                }
+            }
+            
+            console.log('[DEBUG] Финальное время:', publishTime);
             
             return { title, href, publishTime };
         }
@@ -481,14 +560,44 @@ def fetch_latest_notice_instant(driver):
         result = driver.execute_script(js_code)
         
         if not result:
+            logging.warning("[DEBUG] JavaScript не вернул результат")
             return None
+        
+        logging.info(f"[DEBUG] JS result: title={result['title'][:30]}..., href={result['href']}, publishTime={result.get('publishTime')}")
         
         href = result.get('href', '')
         full_link = f"https://upbit.com{href}" if href.startswith('/') else href
         
         publish_time = None
-        if result.get('publishTime'):
-            publish_time = parse_publish_time(result['publishTime'])
+        publish_time_str = result.get('publishTime')
+        
+        if publish_time_str:
+            logging.info(f"[DEBUG] Парсим время: '{publish_time_str}'")
+            publish_time = parse_publish_time(publish_time_str)
+            if publish_time:
+                logging.info(f"[DEBUG] Время распарсено: {publish_time}")
+            else:
+                logging.warning(f"[DEBUG] Не удалось распарсить время: '{publish_time_str}'")
+        else:
+            logging.warning("[DEBUG] publishTime пустой или None")
+        
+        # ОТЛАДКА: Сохраняем HTML первой строки для анализа
+        try:
+            first_row_html = driver.execute_script("""
+                const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
+                if (links.length > 0) {
+                    const tr = links[0].closest('tr');
+                    return tr ? tr.outerHTML : null;
+                }
+                return null;
+            """)
+            
+            if first_row_html:
+                with open("debug_first_row.html", "w", encoding="utf-8") as f:
+                    f.write(first_row_html)
+                logging.info("[DEBUG] HTML первой строки сохранен в debug_first_row.html")
+        except Exception as e:
+            logging.warning(f"[DEBUG] Не удалось сохранить HTML: {e}")
         
         return {
             "title": result['title'],
@@ -497,6 +606,8 @@ def fetch_latest_notice_instant(driver):
         }
     except Exception as e:
         logging.error(f"❌ Ошибка получения новости: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         return None
 
 
