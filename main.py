@@ -66,6 +66,8 @@ def parse_publish_time(time_str):
     - "2025.10.31 10:25:43"
     - "2025-10-31 10:25"
     - "2025-10-31 10:25:43"
+    - "2025.10.31"
+    - "2025-10-31"
     - "10:25"
     - "10:25:43"
     """
@@ -85,6 +87,13 @@ def parse_publish_time(time_str):
 
     last_error = None
     for fmt in full_formats:
+        try:
+            return datetime.strptime(time_str, fmt)
+        except ValueError as exc:
+            last_error = exc
+
+    date_only_formats = ["%Y.%m.%d", "%Y-%m-%d"]
+    for fmt in date_only_formats:
         try:
             return datetime.strptime(time_str, fmt)
         except ValueError as exc:
