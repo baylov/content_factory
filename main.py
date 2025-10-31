@@ -59,7 +59,7 @@ def init_driver():
 def fetch_latest_notice(driver, is_first_load=False):
     """
     Получает последнюю новость с сайта Upbit используя существующий драйвер
-    Пропускает закрепленные записи (data-isfixed="true")
+    Пропускает закрепленные записи по маркеру «공지»
     
     Args:
         driver: Экземпляр WebDriver (уже запущенный)
@@ -116,11 +116,13 @@ def fetch_latest_notice(driver, is_first_load=False):
         pinned_count = 0
         for notice_link in all_notice_links:
             parent_tr = notice_link.find_parent('tr')
-            
-            # Проверяем что родительский <tr> НЕ имеет data-isfixed="true"
+
             if parent_tr:
-                is_fixed = parent_tr.get('data-isfixed')
-                if is_fixed == 'true':
+                # Проверяем наличие маркера закрепленной новости: <span class="css-1y508v5">공지</span>
+                pinned_marker = parent_tr.select_one('span.css-1y508v5')
+
+                # Если маркер есть и содержит текст "공지" - это закрепленная новость
+                if pinned_marker and pinned_marker.get_text(strip=True) == '공지':
                     pinned_count += 1
                     continue
                 else:
@@ -130,7 +132,7 @@ def fetch_latest_notice(driver, is_first_load=False):
         
         # Если первая загрузка и были закреплённые - сообщаем
         if is_first_load and pinned_count > 0:
-            logging.info(f"⏭️  Пропущено закреплённых (data-isfixed=\"true\"): {pinned_count}")
+            logging.info(f"⏭️ Пропущено закреплённых: {pinned_count}")
         
         if not link_tag:
             logging.warning("⚠️ Все новости закреплены, реальных новостей не найдено")
