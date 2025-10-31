@@ -64,80 +64,88 @@ def init_driver():
 
 def parse_publish_time(time_str):
     """
-    Парсит время публикации, указанное на сайте Upbit.
-
-    Поддерживаемые форматы:
-    - "2025.10.31 10:25"
-    - "2025.10.31 10:25:43"
-    - "2025-10-31 10:25"
-    - "2025-10-31 10:25:43"
-    - "2025.10.31"
-    - "2025-10-31"
-    - "10:25"
-    - "10:25:43"
+    Парсит время публикации с сайта Upbit
+    Примеры форматов: "2025.10.31 10:25", "10:25", "2025.10.31"
     """
-    if not time_str:
-        logging.warning("[DEBUG parse_publish_time] time_str пустой")
+    try:
+        if not time_str:
+            logging.error("[parse_publish_time] time_str пустой")
+            return None
+        
+        time_str = time_str.strip()
+        logging.info(f"[parse_publish_time] Обрабатываем: '{time_str}'")
+        
+        # Формат 1: "2025.10.31 10:25" или "2025.10.31 10:25:43" (дата + время)
+        if '.' in time_str and ' ' in time_str:
+            try:
+                result = datetime.strptime(time_str, "%Y.%m.%d %H:%M")
+                logging.info(f"[parse_publish_time] ✅ Формат 1 (дата+время): {result}")
+                return result
+            except ValueError:
+                try:
+                    result = datetime.strptime(time_str, "%Y.%m.%d %H:%M:%S")
+                    logging.info(f"[parse_publish_time] ✅ Формат 1 (дата+время с секундами): {result}")
+                    return result
+                except ValueError:
+                    pass
+        
+        # Формат 1б: "2025-10-31 10:25" или "2025-10-31 10:25:43" (дата + время с дефисами)
+        if '-' in time_str and ' ' in time_str:
+            try:
+                result = datetime.strptime(time_str, "%Y-%m-%d %H:%M")
+                logging.info(f"[parse_publish_time] ✅ Формат 1б (дата-время): {result}")
+                return result
+            except ValueError:
+                try:
+                    result = datetime.strptime(time_str, "%Y-%m-%d %H:%M:%S")
+                    logging.info(f"[parse_publish_time] ✅ Формат 1б (дата-время с секундами): {result}")
+                    return result
+                except ValueError:
+                    pass
+        
+        # Формат 2: "2025.10.31" (только дата)
+        if '.' in time_str and len(time_str) == 10:
+            try:
+                result = datetime.strptime(time_str, "%Y.%m.%d")
+                logging.info(f"[parse_publish_time] ✅ Формат 2 (дата): {result}")
+                return result
+            except ValueError:
+                pass
+        
+        # Формат 2б: "2025-10-31" (только дата с дефисами)
+        if '-' in time_str and len(time_str) == 10:
+            try:
+                result = datetime.strptime(time_str, "%Y-%m-%d")
+                logging.info(f"[parse_publish_time] ✅ Формат 2б (дата): {result}")
+                return result
+            except ValueError:
+                pass
+        
+        # Формат 3: "10:25" или "10:25:43" (только время)
+        if ':' in time_str and len(time_str) <= 8:
+            now = datetime.now()
+            try:
+                time_part = datetime.strptime(time_str, "%H:%M")
+                result = datetime(now.year, now.month, now.day, time_part.hour, time_part.minute)
+                logging.info(f"[parse_publish_time] ✅ Формат 3 (время): {result}")
+                return result
+            except ValueError:
+                try:
+                    time_part = datetime.strptime(time_str, "%H:%M:%S")
+                    result = datetime(now.year, now.month, now.day, time_part.hour, time_part.minute, time_part.second)
+                    logging.info(f"[parse_publish_time] ✅ Формат 3 (время с секундами): {result}")
+                    return result
+                except ValueError:
+                    pass
+        
+        logging.error(f"[parse_publish_time] ❌ Неизвестный формат: '{time_str}'")
         return None
-
-    time_str = time_str.strip()
-    if not time_str:
-        logging.warning("[DEBUG parse_publish_time] time_str пустой после strip()")
+            
+    except Exception as e:
+        logging.error(f"[parse_publish_time] ❌ Ошибка парсинга '{time_str}': {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         return None
-
-    logging.info(f"[DEBUG parse_publish_time] Исходная строка: '{time_str}'")
-
-    full_formats = [
-        "%Y.%m.%d %H:%M",
-        "%Y.%m.%d %H:%M:%S",
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-    ]
-
-    last_error = None
-    for fmt in full_formats:
-        try:
-            result = datetime.strptime(time_str, fmt)
-            logging.info(f"[DEBUG parse_publish_time] Формат дата+время ({fmt}): {result}")
-            return result
-        except ValueError as exc:
-            last_error = exc
-
-    date_only_formats = ["%Y.%m.%d", "%Y-%m-%d"]
-    for fmt in date_only_formats:
-        try:
-            result = datetime.strptime(time_str, fmt)
-            logging.info(f"[DEBUG parse_publish_time] Формат только дата ({fmt}): {result}")
-            return result
-        except ValueError as exc:
-            last_error = exc
-
-    now = datetime.now()
-    time_only_formats = ["%H:%M:%S", "%H:%M"]
-    for fmt in time_only_formats:
-        try:
-            time_part = datetime.strptime(time_str, fmt)
-            result = datetime(
-                now.year,
-                now.month,
-                now.day,
-                time_part.hour,
-                time_part.minute,
-                time_part.second,
-            )
-            logging.info(f"[DEBUG parse_publish_time] Формат только время ({fmt}): {result}")
-            return result
-        except ValueError as exc:
-            last_error = exc
-
-    if last_error:
-        logging.warning(f"[DEBUG parse_publish_time] Не удалось распарсить время: '{time_str}' ({last_error})")
-    else:
-        logging.warning(f"[DEBUG parse_publish_time] Неизвестный формат: '{time_str}'")
-
-    import traceback
-    logging.error(traceback.format_exc())
-    return None
 
 
 def extract_latest_notice_from_soup(soup, *, log_context="", log_stats=False):
@@ -560,10 +568,11 @@ def fetch_latest_notice_instant(driver):
         result = driver.execute_script(js_code)
         
         if not result:
-            logging.warning("[DEBUG] JavaScript не вернул результат")
+            logging.warning("[fetch_latest_notice_instant] JavaScript не вернул результат")
             return None
         
-        logging.info(f"[DEBUG] JS result: title={result['title'][:30]}..., href={result['href']}, publishTime={result.get('publishTime')}")
+        # DEBUG: Показываем что пришло из JavaScript
+        logging.info(f"[DEBUG] JS вернул: title={result['title'][:30]}..., publishTime='{result.get('publishTime')}'")
         
         href = result.get('href', '')
         full_link = f"https://upbit.com{href}" if href.startswith('/') else href
@@ -575,11 +584,11 @@ def fetch_latest_notice_instant(driver):
             logging.info(f"[DEBUG] Парсим время: '{publish_time_str}'")
             publish_time = parse_publish_time(publish_time_str)
             if publish_time:
-                logging.info(f"[DEBUG] Время распарсено: {publish_time}")
+                logging.info(f"[DEBUG] ✅ Время распарсено: {publish_time}")
             else:
-                logging.warning(f"[DEBUG] Не удалось распарсить время: '{publish_time_str}'")
+                logging.error(f"[DEBUG] ❌ Не удалось распарсить: '{publish_time_str}'")
         else:
-            logging.warning("[DEBUG] publishTime пустой или None")
+            logging.error("[DEBUG] ❌ publishTime пустой!")
         
         # ОТЛАДКА: Сохраняем HTML первой строки для анализа
         try:
@@ -640,63 +649,60 @@ def is_new_notice(current_link):
     return current_link != last_link
 
 
-def send_telegram_notification(title, link, publish_time=None):
+def send_telegram_notification(title, link, publish_time=None, detection_time=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
         return
+
+    # Используем переданное время или текущее
+    if detection_time is None:
+        detection_time = datetime.now()
 
     if publish_time and not isinstance(publish_time, datetime):
         logging.warning("⚠️ Время публикации передано в неподдерживаемом формате")
         publish_time = None
 
-    send_time = datetime.now()
-    effective_publish_time = publish_time
-    delay_value = None
-    delay_indicator = ""
+    # Базовое сообщение
+    message = f"""🔔 <b>Новое уведомление на Upbit!</b>
 
+<b>Заголовок:</b> {title}
+<b>Ссылка:</b> {link}
+
+"""
+    
+    # ГАРАНТИРОВАННО показываем время обнаружения
+    det_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+    message += f"📤 <b>Обнаружено:</b> {det_str}\n"
+    
+    # Если есть время публикации - добавляем его и задержку
     if publish_time:
-        delay_value = (send_time - effective_publish_time).total_seconds()
+        effective_publish_time = publish_time
+        delay_value = (detection_time - effective_publish_time).total_seconds()
 
         if delay_value < 0:
             if abs(delay_value) > 12 * 3600:
-                logging.warning("⚠️ Время публикации позже времени отправки. Корректируем на предыдущий день.")
+                logging.warning("⚠️ Время публикации позже времени обнаружения. Корректируем на предыдущий день.")
                 effective_publish_time = publish_time - timedelta(days=1)
-                delay_value = (send_time - effective_publish_time).total_seconds()
+                delay_value = (detection_time - effective_publish_time).total_seconds()
             else:
                 logging.warning("⚠️ Вычисленная задержка получилась отрицательной, берём абсолютное значение")
                 delay_value = abs(delay_value)
 
-        publish_str = effective_publish_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        pub_str = effective_publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         
-        # Статус задержки
         if delay_value < 1.0:
-            delay_indicator = "✅"  # Отлично - цель достигнута
+            delay_status = "✅"
         elif delay_value < 2.0:
-            delay_indicator = "⚠️"  # Хорошо, но можно лучше
+            delay_status = "⚠️"
         else:
-            delay_indicator = "❌"  # Медленно - нужна оптимизация
+            delay_status = "❌"
         
-        delay_text = f"\n⚡ <b>Задержка:</b> {delay_value:.3f} сек {delay_indicator}"
+        message += f"⏰ <b>Опубликовано:</b> {pub_str}\n"
+        message += f"⚡ <b>Задержка:</b> {delay_value:.3f} сек {delay_status}"
     else:
-        publish_str = "неизвестно"
-        delay_text = ""
-
-    detection_str = send_time.strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-
-    logging.info(f"⏰ Время публикации: {publish_str}")
-    logging.info(f"📤 Время обнаружения: {detection_str}")
-    if delay_value is not None:
-        logging.info(f"⚡ Задержка: {delay_value:.3f} сек {delay_indicator}")
+        message += "⏰ <b>Опубликовано:</b> неизвестно"
 
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-
-    message = (
-        "🔔 <b>Новое уведомление на Upbit!</b>\n\n"
-        f"<b>Заголовок:</b> {title}\n"
-        f"<b>Ссылка:</b> {link}\n\n"
-        f"⏰ <b>Время публикации:</b> {publish_str}\n"
-        f"📤 <b>Время обнаружения:</b> {detection_str}{delay_text}"
-    )
 
     data = {
         "chat_id": TELEGRAM_CHAT_ID,
@@ -734,15 +740,28 @@ def main():
         # Получаем первую новость
         notice = fetch_latest_notice_instant(driver)
         if notice:
+            # Фиксируем время обнаружения при старте
+            detection_time = datetime.now()
+            detection_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+            
             logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость: {notice['title']}")
             logging.info(f"🔗 Ссылка: {notice['link']}")
+            logging.info(f"📤 Обнаружено: {detection_str}")
             
-            if notice.get('publish_time'):
-                pub_time_str = notice['publish_time'].strftime('%Y-%m-%d %H:%M:%S')
+            publish_time = notice.get('publish_time')
+            if publish_time:
+                pub_time_str = publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                delay = (detection_time - publish_time).total_seconds()
                 logging.info(f"⏰ Время публикации: {pub_time_str}")
+                logging.info(f"⚡ Задержка: {delay:.3f} сек")
             
             save_last_notice(notice["link"])
-            send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
+            send_telegram_notification(
+                notice["title"], 
+                notice["link"], 
+                publish_time=publish_time,
+                detection_time=detection_time
+            )
             logging.info("✅ Начинаем мониторинг...")
         else:
             logging.error("❌ Не удалось получить первую новость")
@@ -776,12 +795,45 @@ def main():
                     notice = fetch_latest_notice_instant(driver)
 
                     if notice and is_new_notice(notice["link"]):
+                        # КРИТИЧНО: Фиксируем время обнаружения СРАЗУ
+                        detection_time = datetime.now()
+                        detection_str = detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                        
                         logging.info(f"🔔 НОВОЕ УВЕДОМЛЕНИЕ: {notice['title']}")
                         logging.info(f"🔗 Ссылка: {notice['link']}")
-                        logging.info("⚡ Обнаружено мгновенно через MutationObserver!")
+                        
+                        # ГАРАНТИРОВАННОЕ логирование времени обнаружения
+                        logging.info(f"📤 Обнаружено: {detection_str}")
+                        
+                        # Логируем время публикации и задержку если есть
+                        publish_time = notice.get("publish_time")
+                        if publish_time:
+                            publish_str = publish_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+                            delay = (detection_time - publish_time).total_seconds()
+                            
+                            logging.info(f"⏰ Опубликовано: {publish_str}")
+                            logging.info(f"⚡ Задержка: {delay:.3f} сек")
+                            
+                            if delay < 1.0:
+                                logging.info("✅ ОТЛИЧНО: Задержка < 1 сек")
+                            elif delay < 2.0:
+                                logging.warning("⚠️ ХОРОШО: Задержка 1-2 сек")
+                            else:
+                                logging.error(f"❌ МЕДЛЕННО: Задержка {delay:.3f} сек!")
+                        else:
+                            logging.warning("⚠️ Время публикации не извлечено")
+                        
+                        logging.info("📤 Обнаружено через MutationObserver")
 
                         save_last_notice(notice["link"])
-                        send_telegram_notification(notice["title"], notice["link"], notice.get("publish_time"))
+                        
+                        # Передаём detection_time в функцию
+                        send_telegram_notification(
+                            notice["title"], 
+                            notice["link"], 
+                            publish_time=publish_time,
+                            detection_time=detection_time
+                        )
 
                         logging.info("👀 Продолжаем мониторинг...")
 
