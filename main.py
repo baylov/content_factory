@@ -749,13 +749,14 @@ def main():
             return
 
         check_count = 0
-        refresh_interval = 300  # Refresh каждые 300 проверок (~30 секунд при проверке каждые 0.1 сек)
+        refresh_interval = 3000  # Refresh каждые 3000 проверок (5 минут)
 
         while True:
             try:
                 # Периодический refresh для обновления с сервера
                 if check_count > 0 and check_count % refresh_interval == 0:
-                    logging.info(f"🔄 Плановый refresh (каждые {refresh_interval} проверок)...")
+                    refresh_minutes = (refresh_interval * 0.1) / 60
+                    logging.info(f"🔄 Плановый refresh (каждые {refresh_interval} проверок ≈ {refresh_minutes:.1f} мин)...")
                     driver.refresh()
                     wait = WebDriverWait(driver, 10)
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
