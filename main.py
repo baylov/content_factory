@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime
 import re
+from logging.handlers import RotatingFileHandler
 
 import requests
 from bs4 import BeautifulSoup
@@ -27,6 +28,90 @@ logging.basicConfig(
         logging.StreamHandler()
     ]
 )
+
+
+class MetricsLogger:
+    """
+    Логгер для записи детальных метрик производительности обработки новостей
+    """
+    def __init__(self, log_file="logs/performance_metrics.log", max_bytes=10*1024*1024, backup_count=5):
+        self.log_file = log_file
+        self.logger = logging.getLogger("MetricsLogger")
+        self.logger.setLevel(logging.INFO)
+        
+        # Создаем RotatingFileHandler для автоматической ротации логов
+        handler = RotatingFileHandler(
+            log_file,
+            maxBytes=max_bytes,  # 10MB по умолчанию
+            backupCount=backup_count,  # Сохраняем 5 старых файлов
+            encoding='utf-8'
+        )
+        
+        # Формат без префикса уровня - чистый вывод
+        formatter = logging.Formatter('%(message)s')
+        handler.setFormatter(formatter)
+        
+        # Удаляем существующие handlers, если есть
+        self.logger.handlers.clear()
+        self.logger.addHandler(handler)
+        self.logger.propagate = False  # Не передавать логи в root logger
+    
+    def log_article_metrics(self, notice_id, title, source, detected_at, processing_started, 
+                           processing_completed, telegram_sent):
+        """
+        Логирует полные метрики обработки одной новости
+        
+        Args:
+            notice_id: ID новости
+            title: Заголовок новости
+            source: Источник (например, "Upbit Notice")
+            detected_at: datetime - момент обнаружения
+            processing_started: datetime - начало обработки
+            processing_completed: datetime - завершение обработки
+            telegram_sent: datetime - отправка в Telegram
+        """
+        # Вычисляем метрики
+        detection_lag = (processing_started - detected_at).total_seconds()
+        processing_time = (processing_completed - processing_started).total_seconds()
+        total_latency = (telegram_sent - detected_at).total_seconds()
+        
+        # Форматируем временные метки с миллисекундами
+        detected_str = detected_at.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        started_str = processing_started.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        completed_str = processing_completed.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        sent_str = telegram_sent.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        
+        # Формируем сообщение по шаблону
+        log_message = f"""
+[{detected_at.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}] ━━━ NEW ARTICLE ━━━
+Source: {source}
+ID: {notice_id} | Title: "{title}"
+Detected at: {detected_str}
+Processing started: {started_str} (lag: {detection_lag:.3f}s)
+Processing completed: {completed_str} (duration: {processing_time:.3f}s)
+Sent to Telegram: {sent_str}
+⚡️ TOTAL LATENCY: {total_latency:.3f}s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        
+        self.logger.info(log_message.strip())
+    
+    def log_error(self, notice_id, title, error_message):
+        """
+        Логирует ошибку обработки новости
+        """
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        log_message = f"""
+[{timestamp}] ━━━ ERROR ━━━
+ID: {notice_id} | Title: "{title}"
+Error: {error_message}
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+"""
+        self.logger.error(log_message.strip())
+
+
+# Создаем глобальный экземпляр MetricsLogger
+metrics_logger = MetricsLogger()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -502,22 +587,48 @@ def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between
     sorted_ids = sorted(new_ids)
     
     for index, notice_id in enumerate(sorted_ids):
+        # Время обнаружения
+        detection_time = detection_start if detection_start is not None else datetime.now()
+        
+        # Начало обработки
+        processing_start = datetime.now()
+        
+        # Получаем данные новости
         notice = get_notice_by_id(driver, notice_id)
+        
+        # Завершение обработки
+        processing_completed = datetime.now()
+        
         if not notice:
             logging.error(f"❌ Не удалось получить данные новости ID {notice_id}")
+            metrics_logger.log_error(notice_id, "Unknown", "Failed to fetch notice data")
             continue
         
         logging.info(f"🔔 НОВАЯ НОВОСТЬ (ID {notice_id}): {notice['title']}")
         logging.info(f"🔗 Ссылка: {notice['link']}")
         
-        detection_time = detection_start if detection_start is not None else datetime.now()
-        send_telegram_notification(
+        # Отправляем в Telegram и получаем время отправки
+        telegram_sent = send_telegram_notification(
             notice["title"],
             notice["link"],
-            detection_time=detection_time
+            detection_time=detection_time,
+            processing_completed_time=processing_completed
         )
         
-        telegram_sent = datetime.now()
+        # Логируем метрики в отдельный файл
+        try:
+            metrics_logger.log_article_metrics(
+                notice_id=notice_id,
+                title=notice['title'],
+                source="Upbit Notice",
+                detected_at=detection_time,
+                processing_started=processing_start,
+                processing_completed=processing_completed,
+                telegram_sent=telegram_sent
+            )
+        except Exception as e:
+            logging.error(f"❌ Ошибка записи метрик: {e}")
+        
         bot_latency = (telegram_sent - detection_time).total_seconds()
         
         logging.info(f"⏱️ Обнаружено: {detection_time.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
@@ -570,13 +681,22 @@ def is_new_notice(current_link):
     return current_link != last_link
 
 
-def send_telegram_notification(title, link, detection_time=None):
+def send_telegram_notification(title, link, detection_time=None, processing_completed_time=None):
     """
     Отправляет уведомление в Telegram с точными метриками времени
+    
+    Args:
+        title: Заголовок новости
+        link: Ссылка на новость
+        detection_time: datetime - время обнаружения новости
+        processing_completed_time: datetime - время завершения обработки (опционально)
+    
+    Returns:
+        datetime - время отправки в Telegram
     """
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
-        return
+        return datetime.now()
     
     # Момент отправки
     send_time = datetime.now()
@@ -585,35 +705,30 @@ def send_telegram_notification(title, link, detection_time=None):
     message = f"""🔔 <b>Новое уведомление на Upbit!</b>
 
 <b>Заголовок:</b> {title}
-<b>Ссылка:</b> {link}
-
-"""
+<b>Ссылка:</b> {link}"""
     
-    # ТОЧНЫЕ метрики времени
+    # Добавляем футер с метриками (согласно требованию)
     if detection_time:
         bot_latency = (send_time - detection_time).total_seconds()
         
         # Форматируем времена
-        detection_str = detection_time.strftime('%H:%M:%S.%f')[:-3]
-        send_str = send_time.strftime('%H:%M:%S.%f')[:-3]
+        detection_str = detection_time.strftime('%H:%M:%S')
+        send_str = send_time.strftime('%H:%M:%S')
         
-        # Статус задержки
-        if bot_latency < 0.5:
-            status = "✅"
-        elif bot_latency < 1.0:
-            status = "✅"
-        elif bot_latency < 2.0:
-            status = "⚠️"
-        else:
-            status = "❌"
-        
-        message += f"""⏱️ <b>Обнаружено:</b> {detection_str}
-📤 <b>Отправлено:</b> {send_str}
-⚡ <b>Задержка бота:</b> {bot_latency:.3f} сек {status}"""
+        # Футер с метриками
+        message += f"""
+
+─────────────────
+⏱ Обнаружено: {detection_str}
+📤 Отправлено: {send_str}
+⚡️ Задержка: {bot_latency:.2f} сек"""
     else:
         # Если не передано время обнаружения
-        send_str = send_time.strftime('%H:%M:%S.%f')[:-3]
-        message += f"📤 <b>Отправлено:</b> {send_str}"
+        send_str = send_time.strftime('%H:%M:%S')
+        message += f"""
+
+─────────────────
+📤 Отправлено: {send_str}"""
     
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -632,6 +747,8 @@ def send_telegram_notification(title, link, detection_time=None):
             logging.error(f"❌ Ошибка отправки в Telegram: {response.text}")
     except requests.exceptions.RequestException as e:
         logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+    
+    return send_time
 
 
 def main():
@@ -671,7 +788,17 @@ def main():
             # ПЕРВЫЙ ЗАПУСК - отправляем уведомление о текущей максимальной новости
             logging.info("🆕 ПЕРВЫЙ ЗАПУСК - инициализация")
             
+            # Время обнаружения
+            detection_start = datetime.now()
+            
+            # Начало обработки
+            processing_start = datetime.now()
+            
             notice = get_notice_by_id(driver, page_max_id)
+            
+            # Завершение обработки
+            processing_completed = datetime.now()
+            
             if not notice:
                 logging.error(f"❌ Не удалось получить данные новости ID {page_max_id}")
                 return
@@ -679,13 +806,27 @@ def main():
             logging.info(f"🔔 ПЕРВЫЙ ЗАПУСК - текущая новость (ID {page_max_id}): {notice['title']}")
             logging.info(f"🔗 Ссылка: {notice['link']}")
             
-            detection_start = datetime.now()
-            send_telegram_notification(
+            telegram_sent = send_telegram_notification(
                 notice["title"],
                 notice["link"],
-                detection_time=detection_start
+                detection_time=detection_start,
+                processing_completed_time=processing_completed
             )
-            telegram_sent = datetime.now()
+            
+            # Логируем метрики
+            try:
+                metrics_logger.log_article_metrics(
+                    notice_id=page_max_id,
+                    title=notice['title'],
+                    source="Upbit Notice",
+                    detected_at=detection_start,
+                    processing_started=processing_start,
+                    processing_completed=processing_completed,
+                    telegram_sent=telegram_sent
+                )
+            except Exception as e:
+                logging.error(f"❌ Ошибка записи метрик: {e}")
+            
             bot_latency = (telegram_sent - detection_start).total_seconds()
             
             logging.info(f"⏱️ Обнаружено: {detection_start.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
