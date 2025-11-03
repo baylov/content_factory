@@ -123,8 +123,8 @@ LAST_NOTICE_FILE = "last_notice.txt"
 
 def init_driver():
     """
-    Инициализирует Selenium WebDriver с настройками для скорости и стабильности.
-    Оптимизирован для быстрой загрузки с минимизацией ресурсов.
+    Инициализирует Selenium WebDriver с агрессивными настройками для максимальной скорости.
+    Цель: загрузка страницы за 0.3-0.5 секунды вместо 2+ секунд.
     """
     try:
         chrome_options = Options()
@@ -132,37 +132,61 @@ def init_driver():
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
         chrome_options.add_argument('--window-size=1920,1080')
         chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         chrome_options.add_argument('--disable-dev-tools')
         chrome_options.add_argument('--disable-extensions')
-        
-        # Оптимизация скорости загрузки
-        chrome_options.add_argument('--blink-settings=imagesEnabled=false')  # Отключить изображения
         chrome_options.add_argument('--disable-plugins')
         chrome_options.add_argument('--disable-notifications')
         chrome_options.add_argument('--disable-popup-blocking')
         
-        # Дополнительные настройки для производительности
+        # Агрессивная оптимизация скорости - блокировка всех ненужных ресурсов
+        chrome_options.add_argument('--blink-settings=imagesEnabled=false')
+        chrome_options.add_argument('--disable-remote-fonts')
+        chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-default-apps')
+        chrome_options.add_argument('--disable-sync')
+        chrome_options.add_argument('--disable-translate')
+        chrome_options.add_argument('--hide-scrollbars')
+        chrome_options.add_argument('--mute-audio')
+        chrome_options.add_argument('--disable-breakpad')
+        chrome_options.add_argument('--disable-crash-reporter')
+        chrome_options.add_argument('--disable-logging')
+        chrome_options.add_argument('--log-level=3')
+        
+        # Блокировка всех медиа и ненужных ресурсов через prefs
         prefs = {
+            'profile.managed_default_content_settings.images': 2,
+            'profile.managed_default_content_settings.stylesheets': 2,  # Блокировать CSS
             'profile.default_content_setting_values': {
-                'images': 2,  # Блокировать изображения
-                'plugins': 2,  # Блокировать плагины
-                'popups': 2,  # Блокировать всплывающие окна
-            },
-            'profile.managed_default_content_settings': {
-                'images': 2
+                'images': 2,          # Блокировать изображения
+                'plugins': 2,         # Блокировать плагины
+                'popups': 2,          # Блокировать всплывающие окна
+                'media_stream': 2,    # Блокировать медиа-стримы
+                'stylesheets': 2,     # Блокировать стили (может повлиять на структуру!)
             }
         }
         chrome_options.add_experimental_option('prefs', prefs)
+        
+        # КРИТИЧЕСКИ ВАЖНО: используем 'eager' вместо 'normal'
+        # 'eager' не ждет загрузки всех ресурсов, только DOM
+        chrome_options.page_load_strategy = 'eager'
+        
+        # Отключаем логи Chrome
+        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        driver.set_page_load_timeout(15)  # Уменьшен timeout для более быстрых циклов
-        driver.implicitly_wait(5)  # Уменьшен implicit wait
+        # Уменьшаем timeout до 3 секунд (максимум)
+        driver.set_page_load_timeout(3)
+        
+        # Убираем implicit wait - будем использовать explicit wait только для списка новостей
+        driver.implicitly_wait(0)
 
-        logging.info("✅ Браузер Chrome запущен в оптимизированном режиме (быстрая загрузка)")
+        logging.info("✅ Браузер Chrome запущен в ULTRA-FAST режиме (page_load_strategy=eager)")
+        logging.info("🚀 Целевая скорость загрузки: 0.3-0.5 секунды")
         return driver
 
     except Exception as e:
@@ -441,9 +465,19 @@ def get_refresh_interval():
 
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: FAST REFRESH POLLING (без MutationObserver)")
+    logging.info("📡 Режим: ULTRA-FAST REFRESH POLLING")
     logging.info("🔄 Интервал refresh: 1-2 секунды (случайный)")
     logging.info("🔢 Логика: Отслеживание по максимальному ID")
+    logging.info("")
+    logging.info("⚡ ОПТИМИЗАЦИИ СКОРОСТИ:")
+    logging.info("  ✓ page_load_strategy = 'eager' (не ждем все ресурсы)")
+    logging.info("  ✓ Отключены: изображения, CSS, fonts, media")
+    logging.info("  ✓ page_load_timeout = 3 сек (вместо 15)")
+    logging.info("  ✓ implicit_wait = 0 (используем explicit wait)")
+    logging.info("  ✓ Explicit wait только для списка новостей (3 сек)")
+    logging.info("  ✓ Минимальная пауза стабилизации (0.1 сек)")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 0.3-0.5 сек на refresh")
+    logging.info("")
     
     driver = init_driver()
     if not driver:
@@ -455,14 +489,36 @@ def main():
     last_429_time = None
     
     try:
-        # Первая загрузка
+        # Первая загрузка с подробным логированием времени
         logging.info("📡 Подключаемся к Upbit...")
-        driver.get(UPBIT_NOTICE_URL)
-        wait = WebDriverWait(driver, 15)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
         
-        # Небольшая пауза для полной загрузки
-        time.sleep(get_random_delay())
+        page_load_start = time.time()
+        driver.get(UPBIT_NOTICE_URL)
+        page_load_time = time.time() - page_load_start
+        
+        # Ждем только список новостей (explicit wait)
+        wait_start = time.time()
+        wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+        wait_time = time.time() - wait_start
+        
+        total_load_time = time.time() - page_load_start
+        
+        logging.info(f"⏱️ Время загрузки страницы: {page_load_time:.3f}s")
+        logging.info(f"⏱️ Время ожидания списка новостей: {wait_time:.3f}s")
+        logging.info(f"⏱️ ИТОГО время загрузки: {total_load_time:.3f}s")
+        
+        if total_load_time < 0.5:
+            logging.info("✅ ОТЛИЧНО: Загрузка < 0.5 сек!")
+        elif total_load_time < 1.0:
+            logging.info("✅ ХОРОШО: Загрузка < 1 сек")
+        elif total_load_time < 2.0:
+            logging.warning("⚠️ ПРИЕМЛЕМО: Загрузка 1-2 сек")
+        else:
+            logging.error(f"❌ МЕДЛЕННО: Загрузка {total_load_time:.3f} сек")
+        
+        # Небольшая пауза для стабильности JS
+        time.sleep(0.2)
         
         # Получаем все ID со страницы
         all_ids = get_all_notice_ids(driver)
@@ -584,15 +640,38 @@ def main():
                 logging.info(f"🔄 Refresh #{refresh_count} в {refresh_start_time.strftime('%H:%M:%S')}...")
                 
                 try:
-                    # Выполняем refresh страницы
+                    # Выполняем refresh страницы с детальным логированием
+                    refresh_load_start = time.time()
                     driver.refresh()
+                    refresh_load_time = time.time() - refresh_load_start
                     
-                    # Ждем загрузки списка новостей
-                    wait = WebDriverWait(driver, 10)
+                    # Ждем загрузки только списка новостей (explicit wait)
+                    wait_start = time.time()
+                    wait = WebDriverWait(driver, 3)  # Уменьшили с 10 до 3 секунд
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+                    wait_time = time.time() - wait_start
                     
-                    # Небольшая пауза для стабильности
-                    time.sleep(0.3)
+                    # Небольшая пауза для стабильности JS
+                    stability_wait_start = time.time()
+                    time.sleep(0.1)  # Уменьшили с 0.3 до 0.1
+                    stability_wait_time = time.time() - stability_wait_start
+                    
+                    total_refresh_time = time.time() - refresh_load_start
+                    
+                    # Детальное логирование времени каждого этапа
+                    logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
+                    logging.info(f"  ⏱️ Ожидание списка: {wait_time:.3f}s")
+                    logging.info(f"  ⏱️ Стабилизация: {stability_wait_time:.3f}s")
+                    logging.info(f"  ⏱️ ИТОГО refresh: {total_refresh_time:.3f}s")
+                    
+                    if total_refresh_time < 0.5:
+                        logging.info("  ✅ ОТЛИЧНО: Refresh < 0.5 сек!")
+                    elif total_refresh_time < 1.0:
+                        logging.info("  ✅ ХОРОШО: Refresh < 1 сек")
+                    elif total_refresh_time < 2.0:
+                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Refresh 1-2 сек")
+                    else:
+                        logging.error(f"  ❌ МЕДЛЕННО: Refresh {total_refresh_time:.3f} сек")
                     
                     # Сбрасываем backoff если refresh успешен
                     if rate_limit_backoff > 0:
@@ -619,13 +698,13 @@ def main():
                 
                 # Получаем время после загрузки
                 detection_time = datetime.now()
-                load_time = (detection_time - refresh_start_time).total_seconds()
                 
-                if load_time > 2.0:
-                    logging.warning(f"⚠️ Медленная загрузка: {load_time:.2f}с")
-                
-                # Получаем все ID
+                # Парсим список новостей
+                parse_start = time.time()
                 all_ids = get_all_notice_ids(driver)
+                parse_time = time.time() - parse_start
+                
+                logging.info(f"  ⏱️ Парсинг ID: {parse_time:.3f}s")
                 
                 if not all_ids:
                     logging.warning("⚠️ Не удалось получить ID после refresh")
@@ -682,11 +761,11 @@ def main():
                         logging.error("❌ Не удалось переинициализировать браузер, останавливаемся")
                         break
                     
-                    # Перезагружаем страницу
+                    # Перезагружаем страницу с оптимизированными настройками
                     driver.get(UPBIT_NOTICE_URL)
-                    wait = WebDriverWait(driver, 15)
+                    wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    time.sleep(get_random_delay())
+                    time.sleep(0.2)  # Уменьшили задержку
                     
                     # Получаем актуальный max_id
                     reloaded_ids = get_all_notice_ids(driver)
