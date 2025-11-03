@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime
 import re
+import random
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -14,6 +15,7 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
@@ -122,6 +124,7 @@ LAST_NOTICE_FILE = "last_notice.txt"
 def init_driver():
     """
     Инициализирует Selenium WebDriver с настройками для скорости и стабильности.
+    Оптимизирован для быстрой загрузки с минимизацией ресурсов.
     """
     try:
         chrome_options = Options()
@@ -130,333 +133,40 @@ def init_driver():
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
         chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36')
+        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
         chrome_options.add_argument('--disable-dev-tools')
         chrome_options.add_argument('--disable-extensions')
+        
+        # Оптимизация скорости загрузки
+        chrome_options.add_argument('--blink-settings=imagesEnabled=false')  # Отключить изображения
+        chrome_options.add_argument('--disable-plugins')
+        chrome_options.add_argument('--disable-notifications')
+        chrome_options.add_argument('--disable-popup-blocking')
+        
+        # Дополнительные настройки для производительности
+        prefs = {
+            'profile.default_content_setting_values': {
+                'images': 2,  # Блокировать изображения
+                'plugins': 2,  # Блокировать плагины
+                'popups': 2,  # Блокировать всплывающие окна
+            },
+            'profile.managed_default_content_settings': {
+                'images': 2
+            }
+        }
+        chrome_options.add_experimental_option('prefs', prefs)
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        driver.set_page_load_timeout(30)
-        driver.implicitly_wait(10)
+        driver.set_page_load_timeout(15)  # Уменьшен timeout для более быстрых циклов
+        driver.implicitly_wait(5)  # Уменьшен implicit wait
 
-        logging.info("✅ Браузер Chrome запущен в оптимизированном режиме")
+        logging.info("✅ Браузер Chrome запущен в оптимизированном режиме (быстрая загрузка)")
         return driver
 
     except Exception as e:
         logging.error(f"❌ Ошибка инициализации браузера: {e}")
-        return None
-
-
-def extract_latest_notice_from_soup(soup, *, log_context="", log_stats=False):
-    prefix = f"[{log_context}] " if log_context else ""
-
-    all_notice_links = soup.select('tr a[href*="/service_center/notice"]')
-
-    if not all_notice_links:
-        logging.warning(f"{prefix}Не найдены элементы новостей на странице")
-        return None
-
-    if log_stats:
-        logging.info(f"{prefix}🔍 Найдено новостей на странице: {len(all_notice_links)}")
-
-    link_tag = None
-    selected_tr = None
-    pinned_count = 0
-
-    for notice_link in all_notice_links:
-        parent_tr = notice_link.find_parent('tr')
-
-        if parent_tr:
-            notice_marker = parent_tr.select_one('span.css-1y508v5')
-            is_notice = notice_marker and notice_marker.get_text(strip=True) == '공지'
-
-            pin_marker = parent_tr.select_one('use[href="#N_pin_fill_24"]')
-            is_pinned = pin_marker is not None
-
-            if is_notice or is_pinned:
-                pinned_count += 1
-                continue
-
-            link_tag = notice_link
-            selected_tr = parent_tr
-            break
-
-    if link_tag is None:
-        if pinned_count:
-            logging.warning(f"{prefix}Все найденные записи закреплены ({pinned_count})")
-        else:
-            logging.warning(f"{prefix}Все новости закреплены, реальные записи не найдены")
-        return None
-
-    if log_stats and pinned_count > 0:
-        logging.info(f"{prefix}⏭️ Пропущено закреплённых: {pinned_count}")
-
-    title_span = link_tag.select_one('span.css-qju2q6')
-    title = title_span.get_text(strip=True) if title_span else link_tag.get_text(strip=True)
-
-    href = link_tag.get('href')
-    if not href:
-        logging.warning(f"{prefix}Ссылка на новость не содержит атрибут href")
-        return None
-
-    if href.startswith('http'):
-        full_link = href
-    else:
-        full_link = f"https://upbit.com{href}" if href.startswith('/') else f"https://upbit.com/{href}"
-
-    return {
-        "title": title,
-        "link": full_link,
-    }
-
-
-def fetch_notice_from_page_source(driver, *, log_context="Selenium", log_stats=False):
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-    return extract_latest_notice_from_soup(
-        soup,
-        log_context=log_context,
-        log_stats=log_stats,
-    )
-
-
-def fetch_latest_notice_js_polling(driver, is_first_load=False):
-    """
-    Быстрая проверка через JavaScript polling (без полного refresh).
-    """
-    try:
-        start_time = time.time()
-
-        if is_first_load:
-            logging.info("📡 Подключаемся к Upbit (Selenium)...")
-            driver.get(UPBIT_NOTICE_URL)
-            wait = WebDriverWait(driver, 15)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-            time.sleep(0.3)
-
-            notice = fetch_notice_from_page_source(driver, log_stats=True)
-            if notice is None:
-                return None
-
-            elapsed = time.time() - start_time
-            notice["check_time"] = elapsed
-            notice["source"] = "selenium-initial"
-            return notice
-
-        js_code = """
-        const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-        for (const link of links) {
-            const tr = link.closest('tr');
-            if (!tr) {
-                continue;
-            }
-
-            const noticeMarker = tr.querySelector('span.css-1y508v5');
-            const isNotice = noticeMarker && noticeMarker.textContent.trim() === '공지';
-
-            const pinMarker = tr.querySelector('use[href="#N_pin_fill_24"]');
-            const isPinned = pinMarker !== null;
-
-            if (isNotice || isPinned) {
-                continue;
-            }
-
-            const titleSpan = link.querySelector('span.css-qju2q6');
-            const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
-
-            const href = link.getAttribute('href') || '';
-
-            return { title, href };
-        }
-        return null;
-        """
-
-        result = driver.execute_script(js_code)
-
-        if not result:
-            logging.warning("[JS Polling] Не удалось получить новость")
-            return None
-
-        href = (result.get("href") or "").strip()
-        title = (result.get("title") or "").strip()
-
-        if not href:
-            logging.warning("[JS Polling] Получена пустая ссылка на новость")
-            return None
-
-        if href.startswith("http"):
-            full_link = href
-        elif href.startswith("/"):
-            full_link = f"https://upbit.com{href}"
-        else:
-            full_link = f"https://upbit.com/{href}"
-
-        elapsed = time.time() - start_time
-        if elapsed > 0.5:
-            logging.warning(f"⚠️ Медленная JS проверка: {elapsed:.3f} сек")
-
-        notice = {
-            "title": title or full_link,
-            "link": full_link,
-            "check_time": elapsed,
-            "source": "selenium-js",
-        }
-
-        return notice
-
-    except Exception as exc:
-        logging.error(f"❌ Ошибка JS polling: {exc}")
-        return None
-
-
-def fetch_latest_notice_smart_refresh(driver, *, is_first_load=False, force_refresh=False):
-    """
-    Умная проверка:
-    - Полный refresh при первой загрузке или когда запрошен.
-    - Между ними — быстрая проверка через JavaScript.
-    """
-    try:
-        if is_first_load:
-            return fetch_latest_notice_js_polling(driver, is_first_load=True)
-
-        if force_refresh:
-            start_time = time.time()
-            driver.refresh()
-            wait = WebDriverWait(driver, 10)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-            time.sleep(0.2)
-
-            notice = fetch_notice_from_page_source(driver)
-            if notice is None:
-                return None
-
-            elapsed = time.time() - start_time
-            notice["check_time"] = elapsed
-            notice["source"] = "selenium-refresh"
-            return notice
-
-        notice = fetch_latest_notice_js_polling(driver)
-
-        if notice is not None:
-            return notice
-
-        logging.warning("[JS Polling] Не удалось получить новость. Пробуем полный refresh.")
-        return fetch_latest_notice_smart_refresh(driver, is_first_load=False, force_refresh=True)
-
-    except Exception as exc:
-        logging.error(f"❌ Ошибка smart refresh: {exc}")
-        return None
-
-
-def setup_mutation_observer(driver):
-    """
-    Устанавливает JavaScript MutationObserver для мгновенного обнаружения новых новостей
-    """
-    js_code = """
-    if (window.noticeObserver) {
-        window.noticeObserver.disconnect();
-    }
-    
-    window.noticeChanged = false;
-    
-    const table = document.querySelector('table');
-    if (!table) {
-        console.error('[MutationObserver] Таблица не найдена!');
-        return false;
-    }
-    
-    window.noticeObserver = new MutationObserver(function(mutations) {
-        if (!mutations || mutations.length === 0) {
-            return;
-        }
-        window.noticeChanged = true;
-    });
-    
-    window.noticeObserver.observe(table, {
-        childList: true,
-        subtree: true
-    });
-    
-    console.log('[MutationObserver] Наблюдение установлено (по всей таблице)');
-    return true;
-    """
-    
-    try:
-        result = driver.execute_script(js_code)
-        if result:
-            logging.info("✅ MutationObserver установлен")
-        else:
-            logging.error("❌ MutationObserver не установлен (таблица не найдена)")
-        return bool(result)
-    except Exception as e:
-        logging.error(f"❌ Ошибка установки MutationObserver: {e}")
-        return False
-
-
-def check_for_changes(driver):
-    """
-    Проверяет был ли обнаружен MutationObserver изменения
-    МГНОВЕННО (без refresh, без парсинга)
-    """
-    try:
-        result = driver.execute_script("return window.noticeChanged;")
-        
-        if result:
-            # Сбрасываем флаг
-            driver.execute_script("window.noticeChanged = false;")
-            return True
-        
-        return False
-    except:
-        return False
-
-
-def fetch_latest_notice_instant(driver):
-    """
-    Получает данные новости после обнаружения изменений
-    """
-    js_code = """
-    const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-    
-    for (let link of links) {
-        const tr = link.closest('tr');
-        if (!tr) continue;
-        
-        const noticeMarker = tr.querySelector('span.css-1y508v5');
-        const isNotice = noticeMarker && noticeMarker.textContent.trim() === '공지';
-        
-        const pinMarker = tr.querySelector('use[href="#N_pin_fill_24"]');
-        const isPinned = pinMarker !== null;
-        
-        if (!isNotice && !isPinned) {
-            const titleSpan = link.querySelector('span.css-qju2q6');
-            const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
-            const href = link.getAttribute('href');
-            
-            return { title, href };
-        }
-    }
-    return null;
-    """
-    
-    try:
-        result = driver.execute_script(js_code)
-        
-        if not result:
-            logging.warning("[fetch_latest_notice_instant] JavaScript не вернул результат")
-            return None
-        
-        href = result.get('href', '')
-        full_link = f"https://upbit.com{href}" if href.startswith('/') else href
-        
-        return {
-            "title": result['title'],
-            "link": full_link,
-        }
-    except Exception as e:
-        logging.error(f"❌ Ошибка получения новости: {e}")
-        import traceback
-        logging.error(traceback.format_exc())
         return None
 
 
@@ -502,16 +212,16 @@ def get_notice_by_id(driver, notice_id):
     
     for (let link of links) {{
         const href = link.getAttribute('href');
-        if (href.includes('id={notice_id}')) {{
-            const tr = link.closest('tr');
-            if (!tr) continue;
-            
-            const titleSpan = link.querySelector('span.css-qju2q6') || link.querySelector('span.css-twx20f');
+        const match = href.match(/id=(\\d+)/);
+        
+        if (match && parseInt(match[1]) === {notice_id}) {{
+            const titleSpan = link.querySelector('span.css-qju2q6');
             const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
             
             return {{ title, href }};
         }}
     }}
+    
     return null;
     """
     
@@ -652,35 +362,6 @@ def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between
     return processed
 
 
-def read_last_notice():
-    try:
-        if os.path.exists(LAST_NOTICE_FILE):
-            with open(LAST_NOTICE_FILE, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                return content if content else None
-        return None
-    except Exception as e:
-        logging.error(f"Ошибка чтения файла last_notice.txt: {e}")
-        return None
-
-
-def save_last_notice(link):
-    try:
-        with open(LAST_NOTICE_FILE, "w", encoding="utf-8") as f:
-            f.write(link)
-    except Exception as e:
-        logging.error(f"Ошибка записи в файл last_notice.txt: {e}")
-
-
-def is_new_notice(current_link):
-    last_link = read_last_notice()
-    
-    if last_link is None:
-        return False
-    
-    return current_link != last_link
-
-
 def send_telegram_notification(title, link, detection_time=None, processing_completed_time=None):
     """
     Отправляет уведомление в Telegram с точными метриками времени
@@ -702,10 +383,11 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
     send_time = datetime.now()
     
     # Базовое сообщение
-    message = f"""🔔 <b>Новое уведомление на Upbit!</b>
+    message = f"""🔔 <b>Новая новость Upbit</b>
 
-<b>Заголовок:</b> {title}
-<b>Ссылка:</b> {link}"""
+<b>{title}</b>
+
+🔗 {link}"""
     
     # Добавляем футер с метриками (согласно требованию)
     if detection_time:
@@ -718,17 +400,9 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
         # Футер с метриками
         message += f"""
 
-─────────────────
 ⏱ Обнаружено: {detection_str}
 📤 Отправлено: {send_str}
-⚡️ Задержка: {bot_latency:.2f} сек"""
-    else:
-        # Если не передано время обнаружения
-        send_str = send_time.strftime('%H:%M:%S')
-        message += f"""
-
-─────────────────
-📤 Отправлено: {send_str}"""
+⚡️ Задержка: {bot_latency:.1f} сек"""
     
     api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     
@@ -751,9 +425,24 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
     return send_time
 
 
+def get_random_delay():
+    """
+    Возвращает случайную задержку между 0.5 и 1.5 секундами для имитации человека
+    """
+    return random.uniform(0.5, 1.5)
+
+
+def get_refresh_interval():
+    """
+    Возвращает случайный интервал между refresh (1-2 секунды)
+    """
+    return random.uniform(1.0, 2.0)
+
+
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: MutationObserver (мгновенное обнаружение)")
+    logging.info("📡 Режим: FAST REFRESH POLLING (без MutationObserver)")
+    logging.info("🔄 Интервал refresh: 1-2 секунды (случайный)")
     logging.info("🔢 Логика: Отслеживание по максимальному ID")
     
     driver = init_driver()
@@ -761,13 +450,19 @@ def main():
         logging.error("❌ Не удалось запустить браузер")
         return
     
+    # Переменная для отслеживания 429 ошибок
+    rate_limit_backoff = 0  # Дополнительная задержка при 429
+    last_429_time = None
+    
     try:
         # Первая загрузка
         logging.info("📡 Подключаемся к Upbit...")
         driver.get(UPBIT_NOTICE_URL)
         wait = WebDriverWait(driver, 15)
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-        time.sleep(0.5)
+        
+        # Небольшая пауза для полной загрузки
+        time.sleep(get_random_delay())
         
         # Получаем все ID со страницы
         all_ids = get_all_notice_ids(driver)
@@ -833,15 +528,6 @@ def main():
             logging.info(f"📤 Отправлено: {telegram_sent.strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]}")
             logging.info(f"⚡ Задержка бота: {bot_latency:.3f} сек")
             
-            if bot_latency < 0.5:
-                logging.info("✅ ОТЛИЧНО: Задержка < 0.5 сек")
-            elif bot_latency < 1.0:
-                logging.info("✅ ХОРОШО: Задержка < 1 сек")
-            elif bot_latency < 2.0:
-                logging.warning("⚠️ ПРИЕМЛЕМО: Задержка 1-2 сек")
-            else:
-                logging.error(f"❌ МЕДЛЕННО: Задержка {bot_latency:.3f} сек")
-            
             save_max_id(page_max_id)
             tracked_max_id = page_max_id
             logging.info("✅ Начинаем мониторинг...")
@@ -859,7 +545,7 @@ def main():
             logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
             
             # Отправляем уведомления для каждой новой новости
-            notify_about_new_ids(driver, new_ids, pause_between=1.0)
+            notify_about_new_ids(driver, new_ids, pause_between=0.5)
             
             # Обновляем max_id
             save_max_id(page_max_id)
@@ -873,134 +559,160 @@ def main():
             logging.info("✅ Новых новостей нет. Начинаем мониторинг...")
             tracked_max_id = max(page_max_id, last_known_max_id)
         
-        # Устанавливаем MutationObserver
-        if not setup_mutation_observer(driver):
-            logging.error("❌ Не удалось установить MutationObserver")
-            return
+        # Цикл мониторинга с частым refresh
+        current_max_id = tracked_max_id
+        refresh_count = 0
         
-        # Цикл мониторинга
-        check_count = 0
-        refresh_interval = 3000
-        current_max_id = tracked_max_id  # Текущий известный max_id
+        logging.info("🔄 Начинаем polling с refresh каждые 1-2 секунды...")
         
         while True:
             try:
-                # Периодический refresh
-                if check_count > 0 and check_count % refresh_interval == 0:
-                    refresh_minutes = (refresh_interval * 0.1) / 60
-                    logging.info(f"🔄 Плановый refresh (каждые {refresh_interval} проверок ≈ {refresh_minutes:.1f} мин)...")
+                # Вычисляем интервал для следующего refresh
+                base_interval = get_refresh_interval()  # 1-2 секунды
+                human_delay = get_random_delay()  # 0.5-1.5 секунды
+                
+                # Добавляем backoff если была 429 ошибка
+                total_delay = base_interval + human_delay + rate_limit_backoff
+                
+                logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, random: {human_delay:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
+                time.sleep(total_delay)
+                
+                # Время начала refresh
+                refresh_start_time = datetime.now()
+                refresh_count += 1
+                
+                logging.info(f"🔄 Refresh #{refresh_count} в {refresh_start_time.strftime('%H:%M:%S')}...")
+                
+                try:
+                    # Выполняем refresh страницы
                     driver.refresh()
+                    
+                    # Ждем загрузки списка новостей
                     wait = WebDriverWait(driver, 10)
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    time.sleep(0.3)
-                    if not setup_mutation_observer(driver):
-                        logging.error("❌ Не удалось переустановить MutationObserver после refresh")
-                        continue
                     
-                    refreshed_ids = get_all_notice_ids(driver)
-                    if refreshed_ids:
-                        all_ids = refreshed_ids
+                    # Небольшая пауза для стабильности
+                    time.sleep(0.3)
+                    
+                    # Сбрасываем backoff если refresh успешен
+                    if rate_limit_backoff > 0:
+                        logging.info("✅ Refresh успешен, сбрасываем backoff")
+                        rate_limit_backoff = 0
+                        last_429_time = None
+                    
+                except TimeoutException:
+                    # Проверяем статус код - возможно 429
+                    try:
+                        status_code = driver.execute_script("return document.readyState")
+                        if status_code != "complete":
+                            logging.warning("⚠️ Страница не загрузилась полностью")
+                            # Увеличиваем backoff на 10-30 секунд
+                            rate_limit_backoff = random.uniform(10, 30)
+                            last_429_time = datetime.now()
+                            logging.warning(f"⚠️ Возможна блокировка 429, увеличиваем задержку на {rate_limit_backoff:.1f}с")
+                            continue
+                    except:
+                        pass
+                    
+                    logging.warning("⚠️ Timeout при загрузке, пропускаем цикл")
+                    continue
+                
+                # Получаем время после загрузки
+                detection_time = datetime.now()
+                load_time = (detection_time - refresh_start_time).total_seconds()
+                
+                if load_time > 2.0:
+                    logging.warning(f"⚠️ Медленная загрузка: {load_time:.2f}с")
+                
+                # Получаем все ID
+                all_ids = get_all_notice_ids(driver)
+                
+                if not all_ids:
+                    logging.warning("⚠️ Не удалось получить ID после refresh")
+                    continue
+                
+                # Находим максимальный ID
+                page_max_id = max(all_ids)
+                
+                # Проверяем есть ли новые новости
+                if page_max_id > current_max_id:
+                    logging.info(f"🆕 ОБНАРУЖЕНЫ НОВЫЕ НОВОСТИ!")
+                    logging.info(f"📊 Было max_id: {current_max_id}")
+                    logging.info(f"📊 Стало max_id: {page_max_id}")
+                    
+                    # Находим все новые ID
+                    new_ids = [nid for nid in all_ids if nid > current_max_id]
+                    new_ids.sort()
+                    
+                    logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
+                    
+                    # Отправляем уведомления
+                    notify_about_new_ids(driver, new_ids, detection_start=detection_time, pause_between=0.5)
+                    
+                    # Обновляем текущий max_id
+                    current_max_id = page_max_id
+                    save_max_id(current_max_id)
+                    
+                    logging.info("👀 Продолжаем мониторинг...")
+                else:
+                    logging.debug(f"✓ Проверка #{refresh_count}: новостей нет (max_id: {page_max_id})")
+                
+            except WebDriverException as e:
+                error_msg = str(e).lower()
+                
+                # Проверяем на 429 ошибку
+                if '429' in error_msg or 'rate limit' in error_msg or 'too many requests' in error_msg:
+                    rate_limit_backoff = random.uniform(10, 30)
+                    last_429_time = datetime.now()
+                    logging.error(f"❌ Обнаружена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
+                    continue
+                
+                # Проверяем на session error
+                if 'session' in error_msg or 'disconnected' in error_msg:
+                    logging.error(f"❌ Ошибка сессии браузера: {e}")
+                    logging.warning("⚠️ Переинициализация браузера...")
+                    
+                    try:
+                        driver.quit()
+                    except:
+                        pass
+                    
+                    driver = init_driver()
+                    if not driver:
+                        logging.error("❌ Не удалось переинициализировать браузер, останавливаемся")
+                        break
+                    
+                    # Перезагружаем страницу
+                    driver.get(UPBIT_NOTICE_URL)
+                    wait = WebDriverWait(driver, 15)
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+                    time.sleep(get_random_delay())
+                    
+                    # Получаем актуальный max_id
+                    reloaded_ids = get_all_notice_ids(driver)
+                    if reloaded_ids:
+                        all_ids = reloaded_ids
                         page_max_id = max(all_ids)
                         if page_max_id > current_max_id:
-                            logging.info("🆕 Refresh: обнаружены новые ID!")
-                            logging.info(f"📊 Было max_id: {current_max_id}")
-                            logging.info(f"📊 Стало max_id: {page_max_id}")
+                            logging.info("🆕 После переинициализации: обнаружены новые ID!")
                             new_ids = [nid for nid in all_ids if nid > current_max_id]
                             new_ids.sort()
-                            logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
                             detection_start = datetime.now()
                             notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
                             current_max_id = page_max_id
                             save_max_id(current_max_id)
-                            logging.info("👀 Продолжаем мониторинг...")
-                    else:
-                        logging.warning("[refresh] Не удалось получить ID после обновления страницы")
-                
-                # Проверка через MutationObserver
-                if check_for_changes(driver):
-                    detection_start = datetime.now()
+                        else:
+                            current_max_id = max(current_max_id, page_max_id)
                     
-                    # Получаем все ID
-                    all_ids = get_all_notice_ids(driver)
-                    
-                    if all_ids:
-                        page_max_id = max(all_ids)
-                        
-                        # Есть новые новости?
-                        if page_max_id > current_max_id:
-                            logging.info(f"🆕 MutationObserver: обнаружены новые ID!")
-                            logging.info(f"📊 Было max_id: {current_max_id}")
-                            logging.info(f"📊 Стало max_id: {page_max_id}")
-                            
-                            # Находим все новые ID
-                            new_ids = [nid for nid in all_ids if nid > current_max_id]
-                            new_ids.sort()
-                            
-                            logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
-                            
-                            # Отправляем уведомления
-                            notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
-                            
-                            # Обновляем текущий max_id
-                            current_max_id = page_max_id
-                            save_max_id(current_max_id)
-                            
-                            logging.info("👀 Продолжаем мониторинг...")
+                    logging.info("✅ Браузер переинициализирован, продолжаем мониторинг...")
+                    continue
                 
-                check_count += 1
-                time.sleep(0.1)
+                # Другие ошибки
+                logging.error(f"❌ WebDriver ошибка: {e}")
+                time.sleep(5)
                 
             except Exception as exc:
-                error_type = type(exc).__name__
-                logging.error(f"❌ Ошибка ({error_type}): {exc}")
-
-                if 'session' in str(exc).lower():
-                    logging.warning("⚠️ Переинициализация...")
-                    try:
-                        driver.quit()
-                    except Exception:
-                        pass
-
-                    driver = init_driver()
-                    if not driver:
-                        break
-
-                    # Полная переинициализация
-                    try:
-                        driver.get(UPBIT_NOTICE_URL)
-                        wait = WebDriverWait(driver, 15)
-                        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                        time.sleep(0.3)
-                        
-                        # Получаем актуальный max_id
-                        reloaded_ids = get_all_notice_ids(driver)
-                        if reloaded_ids:
-                            all_ids = reloaded_ids
-                            page_max_id = max(all_ids)
-                            if page_max_id > current_max_id:
-                                logging.info("🆕 Переинициализация: обнаружены новые ID!")
-                                logging.info(f"📊 Было max_id: {current_max_id}")
-                                logging.info(f"📊 Стало max_id: {page_max_id}")
-                                new_ids = [nid for nid in all_ids if nid > current_max_id]
-                                new_ids.sort()
-                                logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
-                                detection_start = datetime.now()
-                                notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
-                                current_max_id = page_max_id
-                                save_max_id(current_max_id)
-                                logging.info("👀 Продолжаем мониторинг...")
-                            else:
-                                current_max_id = max(current_max_id, page_max_id)
-                        
-                        if not setup_mutation_observer(driver):
-                            logging.error("❌ Не удалось установить MutationObserver после переинициализации")
-                            break
-                        check_count = 0
-                        logging.info("✅ Браузер переинициализирован")
-                    except Exception as reinit_exc:
-                        logging.error(f"❌ Не удалось переинициализировать: {reinit_exc}")
-                        break
-
+                logging.error(f"❌ Неожиданная ошибка: {type(exc).__name__}: {exc}")
                 time.sleep(5)
                 
     except KeyboardInterrupt:
