@@ -9,14 +9,6 @@ from logging.handlers import RotatingFileHandler
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
-from selenium import webdriver
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
-from webdriver_manager.chrome import ChromeDriverManager
 
 load_dotenv()
 
@@ -121,102 +113,50 @@ UPBIT_NOTICE_URL = "https://upbit.com/service_center/notice"
 LAST_NOTICE_FILE = "last_notice.txt"
 
 
-def init_driver():
+def init_session():
     """
-    Инициализирует Selenium WebDriver с агрессивными настройками для максимальной скорости.
-    Цель: загрузка страницы за 0.3-0.5 секунды вместо 2+ секунд.
+    Инициализирует requests Session с оптимальными настройками для максимальной скорости.
+    Цель: HTTP запрос за 0.2-0.4 секунды.
     """
-    try:
-        chrome_options = Options()
-        chrome_options.add_argument('--headless')
-        chrome_options.add_argument('--no-sandbox')
-        chrome_options.add_argument('--disable-dev-shm-usage')
-        chrome_options.add_argument('--disable-gpu')
-        chrome_options.add_argument('--disable-software-rasterizer')
-        chrome_options.add_argument('--window-size=1920,1080')
-        chrome_options.add_argument('--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36')
-        chrome_options.add_argument('--disable-dev-tools')
-        chrome_options.add_argument('--disable-extensions')
-        chrome_options.add_argument('--disable-plugins')
-        chrome_options.add_argument('--disable-notifications')
-        chrome_options.add_argument('--disable-popup-blocking')
-        
-        # Агрессивная оптимизация скорости - блокировка всех ненужных ресурсов
-        chrome_options.add_argument('--blink-settings=imagesEnabled=false')
-        chrome_options.add_argument('--disable-remote-fonts')
-        chrome_options.add_argument('--disable-background-networking')
-        chrome_options.add_argument('--disable-default-apps')
-        chrome_options.add_argument('--disable-sync')
-        chrome_options.add_argument('--disable-translate')
-        chrome_options.add_argument('--hide-scrollbars')
-        chrome_options.add_argument('--mute-audio')
-        chrome_options.add_argument('--disable-breakpad')
-        chrome_options.add_argument('--disable-crash-reporter')
-        chrome_options.add_argument('--disable-logging')
-        chrome_options.add_argument('--log-level=3')
-        
-        # Блокировка всех медиа и ненужных ресурсов через prefs
-        prefs = {
-            'profile.managed_default_content_settings.images': 2,
-            'profile.managed_default_content_settings.stylesheets': 2,  # Блокировать CSS
-            'profile.default_content_setting_values': {
-                'images': 2,          # Блокировать изображения
-                'plugins': 2,         # Блокировать плагины
-                'popups': 2,          # Блокировать всплывающие окна
-                'media_stream': 2,    # Блокировать медиа-стримы
-                'stylesheets': 2,     # Блокировать стили (может повлиять на структуру!)
-            }
-        }
-        chrome_options.add_experimental_option('prefs', prefs)
-        
-        # КРИТИЧЕСКИ ВАЖНО: используем 'eager' вместо 'normal'
-        # 'eager' не ждет загрузки всех ресурсов, только DOM
-        chrome_options.page_load_strategy = 'eager'
-        
-        # Отключаем логи Chrome
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
-
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
-
-        # Уменьшаем timeout до 3 секунд (максимум)
-        driver.set_page_load_timeout(3)
-        
-        # Убираем implicit wait - будем использовать explicit wait только для списка новостей
-        driver.implicitly_wait(0)
-
-        logging.info("✅ Браузер Chrome запущен в ULTRA-FAST режиме (page_load_strategy=eager)")
-        logging.info("🚀 Целевая скорость загрузки: 0.3-0.5 секунды")
-        return driver
-
-    except Exception as e:
-        logging.error(f"❌ Ошибка инициализации браузера: {e}")
-        return None
+    session = requests.Session()
+    
+    # Настраиваем заголовки для имитации браузера
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,ko;q=0.8',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Cache-Control': 'max-age=0'
+    })
+    
+    logging.info("✅ Requests Session инициализирована")
+    logging.info("🚀 Используем requests + BeautifulSoup для ULTRA-FAST парсинга")
+    logging.info("⚡ Целевая скорость HTTP запроса: 0.2-0.4 секунды")
+    
+    return session
 
 
-def get_all_notice_ids(driver):
+def get_all_notice_ids(soup):
     """
-    Получает все ID новостей со страницы (включая закрепленные)
+    Получает все ID новостей со страницы (включая закрепленные).
+    Парсит HTML через BeautifulSoup.
     Возвращает список ID: [5710, 5709, 5701, 5696, ...]
     """
-    js_code = """
-    const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-    const ids = [];
-    
-    links.forEach(link => {
-        const href = link.getAttribute('href');
-        const match = href.match(/id=(\\d+)/);
-        if (match) {
-            ids.push(parseInt(match[1]));
-        }
-    });
-    
-    return ids;
-    """
-    
     try:
-        ids = driver.execute_script(js_code)
-        if ids and len(ids) > 0:
+        # Ищем все ссылки на новости в таблице
+        links = soup.select('tr a[href*="/service_center/notice"]')
+        
+        ids = []
+        for link in links:
+            href = link.get('href', '')
+            match = re.search(r'id=(\d+)', href)
+            if match:
+                notice_id = int(match.group(1))
+                ids.append(notice_id)
+        
+        if ids:
             logging.info(f"[get_all_notice_ids] Найдено ID: {ids[:5]}... (всего {len(ids)})")
             return ids
         else:
@@ -227,45 +167,143 @@ def get_all_notice_ids(driver):
         return []
 
 
-def get_notice_by_id(driver, notice_id):
+def is_pinned_notice(row_element):
     """
-    Получает данные конкретной новости по её ID
+    Определяет, является ли новость закрепленной.
+    Проверяет наличие маркеров в HTML (например, класс 'pinned', бейдж '고정' и т.д.)
     """
-    js_code = f"""
-    const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-    
-    for (let link of links) {{
-        const href = link.getAttribute('href');
-        const match = href.match(/id=(\\d+)/);
-        
-        if (match && parseInt(match[1]) === {notice_id}) {{
-            const titleSpan = link.querySelector('span.css-qju2q6');
-            const title = titleSpan ? titleSpan.textContent.trim() : link.textContent.trim();
-            
-            return {{ title, href }};
-        }}
-    }}
-    
-    return null;
-    """
-    
     try:
-        result = driver.execute_script(js_code)
+        # Проверяем различные маркеры закрепленных новостей
+        row_html = str(row_element)
         
-        if not result:
-            return None
+        # Типичные маркеры:
+        # - класс 'pinned'
+        # - бейдж с текстом '고정' (закреплено по-корейски)
+        # - специальные CSS классы
+        if 'pinned' in row_html.lower():
+            return True
+        if '고정' in row_html:
+            return True
         
-        href = result['href']
-        full_link = f"https://upbit.com{href}" if href.startswith('/') else href
+        # Проверяем наличие специальных иконок или бейджей
+        badge = row_element.select_one('.badge, .pin-badge, [class*="pin"]')
+        if badge and ('고정' in badge.get_text() or 'pinned' in badge.get_text().lower()):
+            return True
         
-        return {
-            "id": notice_id,
-            "title": result['title'],
-            "link": full_link
-        }
+        return False
+    except Exception as e:
+        logging.error(f"[is_pinned_notice] Ошибка: {e}")
+        return False
+
+
+def get_unpinned_notice_ids(soup):
+    """
+    Получает ID только незакрепленных новостей.
+    Возвращает список ID, отфильтрованный от закрепленных.
+    """
+    try:
+        # Ищем все строки таблицы с новостями
+        rows = soup.select('tr')
+        
+        unpinned_ids = []
+        
+        for row in rows:
+            # Проверяем, закреплена ли новость
+            if is_pinned_notice(row):
+                continue
+            
+            # Ищем ссылку на новость
+            link = row.select_one('a[href*="/service_center/notice"]')
+            if link:
+                href = link.get('href', '')
+                match = re.search(r'id=(\d+)', href)
+                if match:
+                    notice_id = int(match.group(1))
+                    unpinned_ids.append(notice_id)
+        
+        if unpinned_ids:
+            logging.info(f"[get_unpinned_notice_ids] Незакрепленных ID: {unpinned_ids[:5]}... (всего {len(unpinned_ids)})")
+        else:
+            logging.warning("[get_unpinned_notice_ids] Незакрепленных ID не найдено")
+        
+        return unpinned_ids
+    except Exception as e:
+        logging.error(f"[get_unpinned_notice_ids] Ошибка: {e}")
+        return []
+
+
+def get_notice_by_id(soup, notice_id):
+    """
+    Получает данные конкретной новости по её ID из HTML.
+    Парсит через BeautifulSoup.
+    """
+    try:
+        # Ищем все ссылки на новости
+        links = soup.select('tr a[href*="/service_center/notice"]')
+        
+        for link in links:
+            href = link.get('href', '')
+            match = re.search(r'id=(\d+)', href)
+            
+            if match and int(match.group(1)) == notice_id:
+                # Извлекаем заголовок
+                # Сначала пробуем найти span с заголовком
+                title_span = link.select_one('span.css-qju2q6, span[class*="title"]')
+                if title_span:
+                    title = title_span.get_text(strip=True)
+                else:
+                    title = link.get_text(strip=True)
+                
+                # Формируем полную ссылку
+                full_link = f"https://upbit.com{href}" if href.startswith('/') else href
+                
+                return {
+                    "id": notice_id,
+                    "title": title,
+                    "link": full_link
+                }
+        
+        return None
     except Exception as e:
         logging.error(f"[get_notice_by_id] Ошибка для ID {notice_id}: {e}")
         return None
+
+
+def fetch_page(session, url, timeout=2):
+    """
+    Выполняет HTTP запрос и возвращает BeautifulSoup объект.
+    
+    Args:
+        session: requests.Session объект
+        url: URL страницы
+        timeout: таймаут запроса (по умолчанию 2 секунды)
+    
+    Returns:
+        tuple: (soup, response_time, status_code) или (None, 0, status_code) при ошибке
+    """
+    try:
+        start_time = time.time()
+        response = session.get(url, timeout=timeout)
+        response_time = time.time() - start_time
+        
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            return soup, response_time, response.status_code
+        else:
+            logging.error(f"[fetch_page] HTTP {response.status_code}: {url}")
+            return None, response_time, response.status_code
+    
+    except requests.exceptions.Timeout:
+        logging.error(f"[fetch_page] Timeout: {url}")
+        return None, timeout, None
+    
+    except requests.exceptions.ConnectionError as e:
+        logging.error(f"[fetch_page] Connection error: {e}")
+        return None, 0, None
+    
+    except Exception as e:
+        logging.error(f"[fetch_page] Ошибка: {e}")
+        return None, 0, None
 
 
 def get_last_max_id():
@@ -309,7 +347,7 @@ def save_max_id(max_id):
         logging.error(f"[save_max_id] Ошибка записи: {e}")
 
 
-def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between=0.5):
+def notify_about_new_ids(session, soup, new_ids, *, detection_start=None, pause_between=0.5):
     """
     Отправляет уведомления о новых новостях по их ID.
     Возвращает количество успешно обработанных новостей.
@@ -328,7 +366,7 @@ def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between
         processing_start = datetime.now()
         
         # Получаем данные новости
-        notice = get_notice_by_id(driver, notice_id)
+        notice = get_notice_by_id(soup, notice_id)
         
         # Завершение обработки
         processing_completed = datetime.now()
@@ -458,73 +496,68 @@ def get_random_delay():
 
 def get_refresh_interval():
     """
-    Возвращает случайный интервал между refresh (1-2 секунды)
+    Возвращает случайный интервал между refresh (0.5-1.0 секунды для ultra-fast режима)
     """
-    return random.uniform(1.0, 2.0)
+    return random.uniform(0.5, 1.0)
 
 
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: ULTRA-FAST REFRESH POLLING")
-    logging.info("🔄 Интервал refresh: 1-2 секунды (случайный)")
+    logging.info("📡 Режим: ULTRA-FAST REQUESTS + BEAUTIFULSOUP")
+    logging.info("🔄 Интервал проверки: 0.5-1.5 секунды (случайный)")
     logging.info("🔢 Логика: Отслеживание по максимальному ID")
     logging.info("")
     logging.info("⚡ ОПТИМИЗАЦИИ СКОРОСТИ:")
-    logging.info("  ✓ page_load_strategy = 'eager' (не ждем все ресурсы)")
-    logging.info("  ✓ Отключены: изображения, CSS, fonts, media")
-    logging.info("  ✓ page_load_timeout = 3 сек (вместо 15)")
-    logging.info("  ✓ implicit_wait = 0 (используем explicit wait)")
-    logging.info("  ✓ Explicit wait только для списка новостей (3 сек)")
-    logging.info("  ✓ Минимальная пауза стабилизации (0.1 сек)")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 0.3-0.5 сек на refresh")
+    logging.info("  ✓ requests вместо Selenium (без браузера!)")
+    logging.info("  ✓ BeautifulSoup для парсинга HTML")
+    logging.info("  ✓ Keep-alive соединение (переиспользование session)")
+    logging.info("  ✓ Минимальный timeout (2 секунды)")
+    logging.info("  ✓ Без загрузки JavaScript, изображений, CSS")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 0.3-0.5 сек на цикл")
     logging.info("")
     
-    driver = init_driver()
-    if not driver:
-        logging.error("❌ Не удалось запустить браузер")
-        return
+    session = init_session()
     
     # Переменная для отслеживания 429 ошибок
     rate_limit_backoff = 0  # Дополнительная задержка при 429
     last_429_time = None
+    consecutive_errors = 0  # Счетчик последовательных ошибок
     
     try:
         # Первая загрузка с подробным логированием времени
         logging.info("📡 Подключаемся к Upbit...")
         
-        page_load_start = time.time()
-        driver.get(UPBIT_NOTICE_URL)
-        page_load_time = time.time() - page_load_start
+        soup, response_time, status_code = fetch_page(session, UPBIT_NOTICE_URL, timeout=2)
         
-        # Ждем только список новостей (explicit wait)
-        wait_start = time.time()
-        wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-        wait_time = time.time() - wait_start
+        if not soup:
+            logging.error("❌ Не удалось загрузить страницу при первом запросе")
+            if status_code == 429:
+                logging.error("❌ Получена 429 ошибка - слишком много запросов")
+                logging.info("💡 Рекомендация: увеличьте интервал между запросами")
+            return
         
-        total_load_time = time.time() - page_load_start
+        logging.info(f"⏱️ Время HTTP запроса: {response_time:.3f}s")
         
-        logging.info(f"⏱️ Время загрузки страницы: {page_load_time:.3f}s")
-        logging.info(f"⏱️ Время ожидания списка новостей: {wait_time:.3f}s")
-        logging.info(f"⏱️ ИТОГО время загрузки: {total_load_time:.3f}s")
-        
-        if total_load_time < 0.5:
-            logging.info("✅ ОТЛИЧНО: Загрузка < 0.5 сек!")
-        elif total_load_time < 1.0:
-            logging.info("✅ ХОРОШО: Загрузка < 1 сек")
-        elif total_load_time < 2.0:
-            logging.warning("⚠️ ПРИЕМЛЕМО: Загрузка 1-2 сек")
+        if response_time < 0.4:
+            logging.info("✅ ОТЛИЧНО: HTTP запрос < 0.4 сек!")
+        elif response_time < 0.7:
+            logging.info("✅ ХОРОШО: HTTP запрос < 0.7 сек")
+        elif response_time < 1.0:
+            logging.warning("⚠️ ПРИЕМЛЕМО: HTTP запрос < 1 сек")
         else:
-            logging.error(f"❌ МЕДЛЕННО: Загрузка {total_load_time:.3f} сек")
+            logging.error(f"❌ МЕДЛЕННО: HTTP запрос {response_time:.3f} сек")
         
-        # Небольшая пауза для стабильности JS
-        time.sleep(0.2)
+        # Парсим список новостей
+        parse_start = time.time()
+        all_ids = get_all_notice_ids(soup)
+        parse_time = time.time() - parse_start
         
-        # Получаем все ID со страницы
-        all_ids = get_all_notice_ids(driver)
+        logging.info(f"⏱️ Время парсинга HTML: {parse_time:.3f}s")
         
         if not all_ids:
             logging.error("❌ Не удалось получить ID новостей")
+            logging.info("💡 Возможно, структура страницы изменилась или требуется JavaScript")
+            logging.info("💡 Попробуйте проверить HTML структуру страницы")
             return
         
         # Находим максимальный ID на странице
@@ -545,7 +578,7 @@ def main():
             # Начало обработки
             processing_start = datetime.now()
             
-            notice = get_notice_by_id(driver, page_max_id)
+            notice = get_notice_by_id(soup, page_max_id)
             
             # Завершение обработки
             processing_completed = datetime.now()
@@ -601,7 +634,7 @@ def main():
             logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
             
             # Отправляем уведомления для каждой новой новости
-            notify_about_new_ids(driver, new_ids, pause_between=0.5)
+            notify_about_new_ids(session, soup, new_ids, pause_between=0.5)
             
             # Обновляем max_id
             save_max_id(page_max_id)
@@ -615,103 +648,90 @@ def main():
             logging.info("✅ Новых новостей нет. Начинаем мониторинг...")
             tracked_max_id = max(page_max_id, last_known_max_id)
         
-        # Цикл мониторинга с частым refresh
+        # Цикл мониторинга с частым polling
         current_max_id = tracked_max_id
         refresh_count = 0
         
-        logging.info("🔄 Начинаем polling с refresh каждые 1-2 секунды...")
+        logging.info("🔄 Начинаем polling с проверками каждые 0.5-1.5 секунды...")
         
         while True:
             try:
-                # Вычисляем интервал для следующего refresh
-                base_interval = get_refresh_interval()  # 1-2 секунды
+                # Вычисляем интервал для следующей проверки
+                base_interval = get_refresh_interval()  # 0.5-1.0 секунды
                 human_delay = get_random_delay()  # 0.5-1.5 секунды
                 
                 # Добавляем backoff если была 429 ошибка
-                total_delay = base_interval + human_delay + rate_limit_backoff
+                total_delay = base_interval + rate_limit_backoff
                 
-                logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, random: {human_delay:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
+                logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
                 time.sleep(total_delay)
                 
-                # Время начала refresh
-                refresh_start_time = datetime.now()
+                # Время начала цикла
+                cycle_start_time = datetime.now()
+                cycle_start = time.time()
                 refresh_count += 1
                 
-                logging.info(f"🔄 Refresh #{refresh_count} в {refresh_start_time.strftime('%H:%M:%S')}...")
+                logging.info(f"🔄 Проверка #{refresh_count} в {cycle_start_time.strftime('%H:%M:%S')}...")
                 
-                try:
-                    # Выполняем refresh страницы с детальным логированием
-                    refresh_load_start = time.time()
-                    driver.refresh()
-                    refresh_load_time = time.time() - refresh_load_start
+                # === HTTP ЗАПРОС ===
+                http_start = time.time()
+                soup, response_time, status_code = fetch_page(session, UPBIT_NOTICE_URL, timeout=2)
+                http_time = time.time() - http_start
+                
+                logging.info(f"  ⏱️ HTTP запрос: {http_time:.3f}s")
+                
+                # Обработка ошибок HTTP
+                if not soup:
+                    consecutive_errors += 1
                     
-                    # Ждем загрузки только списка новостей (explicit wait)
-                    wait_start = time.time()
-                    wait = WebDriverWait(driver, 3)  # Уменьшили с 10 до 3 секунд
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    wait_time = time.time() - wait_start
+                    if status_code == 429:
+                        # 429 Too Many Requests - увеличиваем задержку
+                        rate_limit_backoff = random.uniform(10, 30)
+                        last_429_time = datetime.now()
+                        logging.error(f"❌ Получена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
+                        continue
                     
-                    # Небольшая пауза для стабильности JS
-                    stability_wait_start = time.time()
-                    time.sleep(0.1)  # Уменьшили с 0.3 до 0.1
-                    stability_wait_time = time.time() - stability_wait_start
+                    elif status_code == 403:
+                        # 403 Forbidden - возможна блокировка
+                        rate_limit_backoff = random.uniform(5, 15)
+                        logging.error(f"❌ Получена 403 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
+                        continue
                     
-                    total_refresh_time = time.time() - refresh_load_start
-                    
-                    # Детальное логирование времени каждого этапа
-                    logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
-                    logging.info(f"  ⏱️ Ожидание списка: {wait_time:.3f}s")
-                    logging.info(f"  ⏱️ Стабилизация: {stability_wait_time:.3f}s")
-                    logging.info(f"  ⏱️ ИТОГО refresh: {total_refresh_time:.3f}s")
-                    
-                    if total_refresh_time < 0.5:
-                        logging.info("  ✅ ОТЛИЧНО: Refresh < 0.5 сек!")
-                    elif total_refresh_time < 1.0:
-                        logging.info("  ✅ ХОРОШО: Refresh < 1 сек")
-                    elif total_refresh_time < 2.0:
-                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Refresh 1-2 сек")
                     else:
-                        logging.error(f"  ❌ МЕДЛЕННО: Refresh {total_refresh_time:.3f} сек")
-                    
-                    # Сбрасываем backoff если refresh успешен
-                    if rate_limit_backoff > 0:
-                        logging.info("✅ Refresh успешен, сбрасываем backoff")
-                        rate_limit_backoff = 0
-                        last_429_time = None
-                    
-                except TimeoutException:
-                    # Проверяем статус код - возможно 429
-                    try:
-                        status_code = driver.execute_script("return document.readyState")
-                        if status_code != "complete":
-                            logging.warning("⚠️ Страница не загрузилась полностью")
-                            # Увеличиваем backoff на 10-30 секунд
-                            rate_limit_backoff = random.uniform(10, 30)
-                            last_429_time = datetime.now()
-                            logging.warning(f"⚠️ Возможна блокировка 429, увеличиваем задержку на {rate_limit_backoff:.1f}с")
-                            continue
-                    except:
-                        pass
-                    
-                    logging.warning("⚠️ Timeout при загрузке, пропускаем цикл")
-                    continue
+                        # Другие ошибки - просто логируем и продолжаем
+                        logging.warning(f"⚠️ Не удалось загрузить страницу (попытка #{refresh_count}), продолжаем...")
+                        
+                        # Если слишком много последовательных ошибок - увеличиваем интервал
+                        if consecutive_errors > 5:
+                            rate_limit_backoff = random.uniform(5, 10)
+                            logging.warning(f"⚠️ Много последовательных ошибок, увеличиваем интервал на {rate_limit_backoff:.1f}с")
+                        
+                        continue
                 
-                # Получаем время после загрузки
-                detection_time = datetime.now()
+                # Успешный запрос - сбрасываем счетчики
+                consecutive_errors = 0
+                if rate_limit_backoff > 0:
+                    logging.info("✅ HTTP запрос успешен, сбрасываем backoff")
+                    rate_limit_backoff = 0
+                    last_429_time = None
                 
-                # Парсим список новостей
+                # === ПАРСИНГ HTML ===
                 parse_start = time.time()
-                all_ids = get_all_notice_ids(driver)
+                all_ids = get_all_notice_ids(soup)
                 parse_time = time.time() - parse_start
                 
-                logging.info(f"  ⏱️ Парсинг ID: {parse_time:.3f}s")
+                logging.info(f"  ⏱️ Парсинг HTML: {parse_time:.3f}s")
                 
                 if not all_ids:
-                    logging.warning("⚠️ Не удалось получить ID после refresh")
+                    logging.warning("⚠️ Не удалось получить ID после запроса")
                     continue
                 
-                # Находим максимальный ID
+                # === ПРОВЕРКА ID ===
+                check_start = time.time()
                 page_max_id = max(all_ids)
+                check_time = time.time() - check_start
+                
+                logging.info(f"  ⏱️ Проверка ID: {check_time:.3f}s")
                 
                 # Проверяем есть ли новые новости
                 if page_max_id > current_max_id:
@@ -725,71 +745,52 @@ def main():
                     
                     logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
                     
-                    # Отправляем уведомления
-                    notify_about_new_ids(driver, new_ids, detection_start=detection_time, pause_between=0.5)
+                    # === ОТПРАВКА В TELEGRAM ===
+                    telegram_start = time.time()
+                    notify_about_new_ids(session, soup, new_ids, detection_start=cycle_start_time, pause_between=0.5)
+                    telegram_time = time.time() - telegram_start
+                    
+                    logging.info(f"  ⏱️ Отправка в Telegram: {telegram_time:.3f}s")
                     
                     # Обновляем текущий max_id
                     current_max_id = page_max_id
                     save_max_id(current_max_id)
                     
+                    # Общее время цикла
+                    total_cycle_time = time.time() - cycle_start
+                    logging.info(f"  ⏱️ ИТОГО цикл: {total_cycle_time:.3f}s")
+                    
+                    if total_cycle_time < 0.5:
+                        logging.info("  ✅ ОТЛИЧНО: Цикл < 0.5 сек!")
+                    elif total_cycle_time < 1.0:
+                        logging.info("  ✅ ХОРОШО: Цикл < 1 сек")
+                    elif total_cycle_time < 2.0:
+                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Цикл 1-2 сек")
+                    else:
+                        logging.error(f"  ❌ МЕДЛЕННО: Цикл {total_cycle_time:.3f} сек")
+                    
                     logging.info("👀 Продолжаем мониторинг...")
                 else:
+                    # Общее время цикла (без отправки в Telegram)
+                    total_cycle_time = time.time() - cycle_start
+                    logging.info(f"  ⏱️ ИТОГО цикл: {total_cycle_time:.3f}s")
+                    
+                    if total_cycle_time < 0.5:
+                        logging.info("  ✅ ОТЛИЧНО: Цикл < 0.5 сек!")
+                    elif total_cycle_time < 1.0:
+                        logging.info("  ✅ ХОРОШО: Цикл < 1 сек")
+                    
                     logging.debug(f"✓ Проверка #{refresh_count}: новостей нет (max_id: {page_max_id})")
                 
-            except WebDriverException as e:
-                error_msg = str(e).lower()
-                
-                # Проверяем на 429 ошибку
-                if '429' in error_msg or 'rate limit' in error_msg or 'too many requests' in error_msg:
-                    rate_limit_backoff = random.uniform(10, 30)
-                    last_429_time = datetime.now()
-                    logging.error(f"❌ Обнаружена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
-                    continue
-                
-                # Проверяем на session error
-                if 'session' in error_msg or 'disconnected' in error_msg:
-                    logging.error(f"❌ Ошибка сессии браузера: {e}")
-                    logging.warning("⚠️ Переинициализация браузера...")
-                    
-                    try:
-                        driver.quit()
-                    except:
-                        pass
-                    
-                    driver = init_driver()
-                    if not driver:
-                        logging.error("❌ Не удалось переинициализировать браузер, останавливаемся")
-                        break
-                    
-                    # Перезагружаем страницу с оптимизированными настройками
-                    driver.get(UPBIT_NOTICE_URL)
-                    wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    time.sleep(0.2)  # Уменьшили задержку
-                    
-                    # Получаем актуальный max_id
-                    reloaded_ids = get_all_notice_ids(driver)
-                    if reloaded_ids:
-                        all_ids = reloaded_ids
-                        page_max_id = max(all_ids)
-                        if page_max_id > current_max_id:
-                            logging.info("🆕 После переинициализации: обнаружены новые ID!")
-                            new_ids = [nid for nid in all_ids if nid > current_max_id]
-                            new_ids.sort()
-                            detection_start = datetime.now()
-                            notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
-                            current_max_id = page_max_id
-                            save_max_id(current_max_id)
-                        else:
-                            current_max_id = max(current_max_id, page_max_id)
-                    
-                    logging.info("✅ Браузер переинициализирован, продолжаем мониторинг...")
-                    continue
-                
-                # Другие ошибки
-                logging.error(f"❌ WebDriver ошибка: {e}")
+            except requests.exceptions.Timeout:
+                logging.warning("⚠️ Timeout при запросе, продолжаем...")
+                time.sleep(2)
+            
+            except requests.exceptions.ConnectionError as e:
+                logging.error(f"❌ Connection error: {e}")
+                logging.warning("⚠️ Ждем 5 секунд перед повторной попыткой...")
                 time.sleep(5)
-                
+            
             except Exception as exc:
                 logging.error(f"❌ Неожиданная ошибка: {type(exc).__name__}: {exc}")
                 time.sleep(5)
@@ -797,9 +798,7 @@ def main():
     except KeyboardInterrupt:
         logging.info("⏹️ Остановка (Ctrl+C)")
     finally:
-        if driver:
-            driver.quit()
-            logging.info("✅ Браузер закрыт")
+        logging.info("✅ Сессия завершена")
 
 
 if __name__ == "__main__":
