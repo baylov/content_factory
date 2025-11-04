@@ -208,36 +208,252 @@ def init_driver():
         return None
 
 
+def debug_save_html_and_find_selectors(driver):
+    """
+    Сохраняет HTML страницы и тестирует разные селекторы для диагностики проблем
+    """
+    try:
+        logging.info("🔍 ДИАГНОСТИКА: Начинаем анализ страницы...")
+        
+        # Сохраняем HTML
+        html = driver.page_source
+        debug_file = 'upbit_debug.html'
+        with open(debug_file, 'w', encoding='utf-8') as f:
+            f.write(html)
+        logging.info(f"💾 HTML сохранен в {debug_file}")
+        
+        # Тестируем разные селекторы через JavaScript
+        selectors_to_test = [
+            'a[href*="/service_center/notice?id="]',
+            'a[href*="/service_center/notice"]',
+            'tr a[href*="notice"]',
+            '.notice-list a',
+            '[class*="notice"] a',
+            'table a[href*="id="]',
+            'a[href*="id="]',
+            'tr a',
+        ]
+        
+        logging.info("🔍 Тестируем селекторы:")
+        best_selector = None
+        best_count = 0
+        
+        for selector in selectors_to_test:
+            try:
+                result = driver.execute_script(f"""
+                    const links = document.querySelectorAll('{selector}');
+                    const samples = [];
+                    for (let i = 0; i < Math.min(3, links.length); i++) {{
+                        samples.push({{
+                            href: links[i].getAttribute('href') || '',
+                            text: links[i].textContent.trim().substring(0, 50)
+                        }});
+                    }}
+                    return {{
+                        count: links.length,
+                        samples: samples
+                    }};
+                """)
+                
+                count = result['count']
+                samples = result['samples']
+                
+                logging.info(f"  🔍 Селектор '{selector}': найдено {count} элементов")
+                
+                if count > best_count:
+                    best_count = count
+                    best_selector = selector
+                
+                if count > 0 and samples:
+                    for s in samples[:3]:
+                        text = s['text'][:50]
+                        href = s['href'][:60] if s['href'] else 'NO HREF'
+                        logging.info(f"     📄 {text} -> {href}")
+            except Exception as e:
+                logging.error(f"  ❌ Ошибка тестирования селектора '{selector}': {e}")
+        
+        if best_selector:
+            logging.info(f"✅ ЛУЧШИЙ СЕЛЕКТОР: '{best_selector}' ({best_count} элементов)")
+            logging.info(f"💡 РЕКОМЕНДАЦИЯ: Используйте селектор '{best_selector}'")
+        else:
+            logging.error("❌ НЕ НАЙДЕНО подходящих селекторов!")
+            logging.error("💡 Проверьте upbit_debug.html вручную")
+        
+        return best_selector
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка диагностики: {e}")
+        return None
+
+
+def wait_for_notices_js(driver, max_wait=1.0):
+    """
+    Ждет появления новостей, проверяя каждые 50ms
+    Возвращает True если новости появились, False если timeout
+    """
+    start = time.time()
+    check_interval = 0.05  # 50ms
+    
+    while time.time() - start < max_wait:
+        try:
+            count = driver.execute_script("""
+                return document.querySelectorAll('a[href*="/service_center/notice"]').length;
+            """)
+            
+            if count > 0:
+                elapsed = time.time() - start
+                logging.info(f"⚡ Новости появились за {elapsed:.3f}s")
+                return True
+        except:
+            pass
+        
+        time.sleep(check_interval)
+    
+    elapsed = time.time() - start
+    logging.warning(f"⚠️ Новости не появились за {elapsed:.3f}s")
+    return False
+
+
 def get_all_notice_ids(driver):
     """
-    Получает все ID новостей со страницы (включая закрепленные)
-    Возвращает список ID: [5710, 5709, 5701, 5696, ...]
-    """
-    js_code = """
-    const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
-    const ids = [];
+    Извлекает ID новостей через JavaScript с умными fallback стратегиями.
     
-    links.forEach(link => {
-        const href = link.getAttribute('href');
-        const match = href.match(/id=(\\d+)/);
-        if (match) {
-            ids.push(parseInt(match[1]));
-        }
-    });
+    Приоритет 1: НАЙТИ новости (правильный селектор)
+    Приоритет 2: Сделать быстро (< 1 сек)
     
-    return ids;
+    Возвращает список ID незакрепленных новостей: [5710, 5709, 5701, ...]
+    При ошибке автоматически запускает диагностику.
     """
+    start_time = time.time()
     
     try:
-        ids = driver.execute_script(js_code)
-        if ids and len(ids) > 0:
-            logging.info(f"[get_all_notice_ids] Найдено ID: {ids[:5]}... (всего {len(ids)})")
-            return ids
-        else:
-            logging.warning("[get_all_notice_ids] ID не найдены")
+        # JavaScript код с несколькими стратегиями поиска
+        result = driver.execute_script("""
+            // Стратегия 1: Точный селектор с id параметром
+            let links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
+            let strategy = 'exact_id';
+            
+            // Стратегия 2: Если не нашли - любые ссылки с notice
+            if (links.length === 0) {
+                links = document.querySelectorAll('a[href*="/service_center/notice"]');
+                strategy = 'notice_links';
+            }
+            
+            // Стратегия 3: Если все еще не нашли - ссылки в tr с notice
+            if (links.length === 0) {
+                links = document.querySelectorAll('tr a[href*="notice"]');
+                strategy = 'tr_notice';
+            }
+            
+            // Стратегия 4: Если все еще не нашли - любые ссылки с id= параметром
+            if (links.length === 0) {
+                links = document.querySelectorAll('a[href*="id="]');
+                strategy = 'any_id';
+            }
+            
+            console.log('Strategy used:', strategy, 'Links found:', links.length);
+            
+            const notices = [];
+            
+            links.forEach(link => {
+                const href = link.getAttribute('href');
+                if (!href) return;
+                
+                // Извлекаем ID из href
+                const match = href.match(/id=(\\d+)/);
+                if (!match) return;
+                
+                const id = parseInt(match[1]);
+                const title = link.textContent.trim();
+                
+                // Проверяем закрепленность несколькими способами
+                let isPinned = false;
+                
+                // Способ 1: Проверка текста на маркер 공지 (공지 = "объявление/уведомление" на корейском)
+                const row = link.closest('tr') || link.closest('div') || link.parentElement;
+                if (row) {
+                    const rowText = row.textContent;
+                    isPinned = rowText.includes('공지');
+                }
+                
+                // Способ 2: Проверка на иконку pin
+                if (!isPinned && row) {
+                    const pinIcon = row.querySelector('[class*="pin"]') || 
+                                   row.querySelector('[class*="fixed"]') ||
+                                   row.querySelector('svg[class*="pin"]');
+                    isPinned = pinIcon !== null;
+                }
+                
+                // Способ 3: Проверка класса row
+                if (!isPinned && row) {
+                    const rowClass = row.className || '';
+                    isPinned = rowClass.includes('pinned') || 
+                              rowClass.includes('fixed') ||
+                              rowClass.includes('notice');
+                }
+                
+                // Добавляем только незакрепленные
+                if (!isPinned) {
+                    notices.push({
+                        id: id,
+                        title: title,
+                        href: href
+                    });
+                }
+            });
+            
+            // Возвращаем результат
+            return {
+                success: notices.length > 0,
+                count: notices.length,
+                totalLinks: links.length,
+                notices: notices,
+                strategy: strategy
+            };
+        """)
+        
+        parse_time = time.time() - start_time
+        
+        # Проверяем результат
+        if not result['success'] or result['count'] == 0:
+            logging.error(f"❌ Новости не найдены!")
+            logging.error(f"   Strategy: {result.get('strategy', 'unknown')}")
+            logging.error(f"   Total links found: {result.get('totalLinks', 0)}")
+            logging.error("💡 Запускаем диагностику...")
+            
+            # Автоматически запускаем диагностику
+            debug_save_html_and_find_selectors(driver)
             return []
+        
+        # Извлекаем только ID
+        notice_ids = [n['id'] for n in result['notices']]
+        
+        # Детальное логирование
+        logging.info(f"✅ Найдено {result['count']} новостей (strategy: {result['strategy']}, total links: {result['totalLinks']})")
+        logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
+        logging.info(f"⏱️ Время парсинга: {parse_time:.3f}s")
+        
+        # Оценка скорости
+        if parse_time > 1.0:
+            logging.warning(f"⚠️ Медленно: {parse_time:.3f}s > 1.0s")
+        elif parse_time > 0.5:
+            logging.info(f"✅ Хорошо: {parse_time:.3f}s < 1.0s")
+        else:
+            logging.info(f"⚡ Отлично: {parse_time:.3f}s < 0.5s!")
+        
+        return notice_ids
+        
     except Exception as e:
-        logging.error(f"[get_all_notice_ids] Ошибка: {e}")
+        parse_time = time.time() - start_time
+        logging.error(f"❌ Ошибка парсинга (время: {parse_time:.3f}s): {e}")
+        logging.error("💡 Запускаем диагностику...")
+        
+        # Автоматически запускаем диагностику при ошибке
+        try:
+            debug_save_html_and_find_selectors(driver)
+        except Exception as debug_error:
+            logging.error(f"❌ Ошибка диагностики: {debug_error}")
+        
         return []
 
 
@@ -479,15 +695,18 @@ def get_refresh_interval():
 
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: SELENIUM + OPTIMIZED")
-    logging.info("🔄 Интервал проверки: 0.5-1.5 секунды")
+    logging.info("📡 Режим: ULTRA-FAST JS PARSER + SMART SELECTOR CHECK")
+    logging.info("🔄 Интервал проверки: 1-2 секунды")
     logging.info("")
     logging.info("⚡ ОПТИМИЗАЦИИ:")
-    logging.info("  ✓ Selenium headless Chrome")
-    logging.info("  ✓ Отключены изображения, media")
+    logging.info("  ✓ Selenium headless Chrome с STEALTH")
+    logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
-    logging.info("  ✓ Переиспользование WebDriver")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 1-2 сек на цикл")
+    logging.info("  ✓ Умное ожидание (polling 50ms)")
+    logging.info("  ✓ JavaScript парсинг с fallback стратегиями")
+    logging.info("  ✓ Автодиагностика при ошибках")
+    logging.info("  ✓ Детальные метрики на каждом этапе")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1 сек на цикл")
     logging.info("")
     
     driver = init_driver()
@@ -503,36 +722,47 @@ def main():
         # Первая загрузка с подробным логированием времени
         logging.info("📡 Подключаемся к Upbit...")
         
+        cycle_start = time.time()
+        
+        # 1. Загрузка страницы
         page_load_start = time.time()
         driver.get(UPBIT_NOTICE_URL)
         page_load_time = time.time() - page_load_start
+        logging.info(f"  ⏱️ Загрузка страницы: {page_load_time:.3f}s")
         
-        # Ждем только список новостей (explicit wait)
+        # 2. Умное ожидание появления новостей (polling с проверкой каждые 50ms)
         wait_start = time.time()
-        wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+        notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
         wait_time = time.time() - wait_start
         
-        total_load_time = time.time() - page_load_start
+        # Fallback: если новости не появились за 0.5s, даём ещё 0.5s
+        if not notices_appeared:
+            logging.warning("⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
+            time.sleep(0.5)
+            wait_time = time.time() - wait_start
         
-        logging.info(f"⏱️ Время загрузки страницы: {page_load_time:.3f}s")
-        logging.info(f"⏱️ Время ожидания списка новостей: {wait_time:.3f}s")
-        logging.info(f"⏱️ ИТОГО время загрузки: {total_load_time:.3f}s")
+        logging.info(f"  ⏱️ Ожидание новостей: {wait_time:.3f}s")
         
-        if total_load_time < 0.5:
-            logging.info("✅ ОТЛИЧНО: Загрузка < 0.5 сек!")
-        elif total_load_time < 1.0:
-            logging.info("✅ ХОРОШО: Загрузка < 1 сек")
-        elif total_load_time < 2.0:
-            logging.warning("⚠️ ПРИЕМЛЕМО: Загрузка 1-2 сек")
-        else:
-            logging.error(f"❌ МЕДЛЕННО: Загрузка {total_load_time:.3f} сек")
-        
-        # Убрано для скорости - новости загружаются мгновенно
-        # time.sleep(1)
-        
-        # Получаем все ID со страницы
+        # 3. Парсинг ID (время учтено внутри get_all_notice_ids)
+        parse_start = time.time()
         all_ids = get_all_notice_ids(driver)
+        parse_time = time.time() - parse_start
+        
+        # Итоговое время всего цикла
+        total_cycle_time = time.time() - cycle_start
+        
+        logging.info(f"⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
+        logging.info(f"   Загрузка: {page_load_time:.3f}s | Ожидание: {wait_time:.3f}s | Парсинг: {parse_time:.3f}s")
+        
+        # Оценка общей производительности
+        if total_cycle_time < 1.0:
+            logging.info("✅ ⚡ ОТЛИЧНО: Полный цикл < 1 сек!")
+        elif total_cycle_time < 1.5:
+            logging.info("✅ ХОРОШО: Полный цикл < 1.5 сек")
+        elif total_cycle_time < 2.0:
+            logging.warning("⚠️ ПРИЕМЛЕМО: Полный цикл 1.5-2 сек")
+        else:
+            logging.error(f"❌ МЕДЛЕННО: Полный цикл {total_cycle_time:.3f} сек")
         
         if not all_ids:
             logging.error("❌ Не удалось получить ID новостей")
@@ -651,35 +881,48 @@ def main():
                 logging.info(f"🔄 Refresh #{refresh_count} в {refresh_start_time.strftime('%H:%M:%S')}...")
                 
                 try:
-                    # Выполняем refresh страницы с детальным логированием
+                    # Время начала всего цикла refresh
+                    cycle_start = time.time()
+                    
+                    # 1. Выполняем refresh страницы
                     refresh_load_start = time.time()
                     driver.refresh()
                     refresh_load_time = time.time() - refresh_load_start
+                    logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
                     
-                    # Ждем загрузки только списка новостей (explicit wait)
+                    # 2. Умное ожидание появления новостей (polling)
                     wait_start = time.time()
-                    wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+                    notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
                     wait_time = time.time() - wait_start
                     
-                    # Убрано для скорости - новости загружаются мгновенно
-                    # time.sleep(1)
+                    # Fallback: если новости не появились за 0.5s, даём ещё 0.5s
+                    if not notices_appeared:
+                        logging.warning("  ⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
+                        time.sleep(0.5)
+                        wait_time = time.time() - wait_start
                     
-                    total_refresh_time = time.time() - refresh_load_start
+                    logging.info(f"  ⏱️ Ожидание новостей: {wait_time:.3f}s")
                     
-                    # Детальное логирование времени каждого этапа
-                    logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
-                    logging.info(f"  ⏱️ Ожидание списка: {wait_time:.3f}s")
-                    logging.info(f"  ⏱️ ИТОГО refresh: {total_refresh_time:.3f}s")
+                    # 3. Парсинг ID (время учтено внутри get_all_notice_ids)
+                    parse_start = time.time()
+                    all_ids = get_all_notice_ids(driver)
+                    parse_time = time.time() - parse_start
                     
-                    if total_refresh_time < 0.5:
-                        logging.info("  ✅ ОТЛИЧНО: Refresh < 0.5 сек!")
-                    elif total_refresh_time < 1.0:
-                        logging.info("  ✅ ХОРОШО: Refresh < 1 сек")
-                    elif total_refresh_time < 2.0:
-                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Refresh 1-2 сек")
+                    # Итоговое время всего цикла
+                    total_cycle_time = time.time() - cycle_start
+                    
+                    logging.info(f"  ⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
+                    logging.info(f"     Refresh: {refresh_load_time:.3f}s | Ожидание: {wait_time:.3f}s | Парсинг: {parse_time:.3f}s")
+                    
+                    # Оценка производительности
+                    if total_cycle_time < 1.0:
+                        logging.info("  ✅ ⚡ ОТЛИЧНО: Цикл < 1 сек!")
+                    elif total_cycle_time < 1.5:
+                        logging.info("  ✅ ХОРОШО: Цикл < 1.5 сек")
+                    elif total_cycle_time < 2.0:
+                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Цикл 1.5-2 сек")
                     else:
-                        logging.error(f"  ❌ МЕДЛЕННО: Refresh {total_refresh_time:.3f} сек")
+                        logging.error(f"  ❌ МЕДЛЕННО: Цикл {total_cycle_time:.3f} сек")
                     
                     # Сбрасываем backoff если refresh успешен
                     if rate_limit_backoff > 0:
@@ -704,15 +947,8 @@ def main():
                     logging.warning("⚠️ Timeout при загрузке, пропускаем цикл")
                     continue
                 
-                # Получаем время после загрузки
+                # Получаем время после загрузки - момент обнаружения новостей
                 detection_time = datetime.now()
-                
-                # Парсим список новостей
-                parse_start = time.time()
-                all_ids = get_all_notice_ids(driver)
-                parse_time = time.time() - parse_start
-                
-                logging.info(f"  ⏱️ Парсинг ID: {parse_time:.3f}s")
                 
                 if not all_ids:
                     logging.warning("⚠️ Не удалось получить ID после refresh")
@@ -769,12 +1005,9 @@ def main():
                         logging.error("❌ Не удалось переинициализировать браузер, останавливаемся")
                         break
                     
-                    # Перезагружаем страницу с оптимизированными настройками
+                    # Перезагружаем страницу с умным ожиданием
                     driver.get(UPBIT_NOTICE_URL)
-                    wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
-                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    # Убрано для скорости - новости загружаются мгновенно
-                    # time.sleep(1)
+                    wait_for_notices_js(driver, max_wait=1.0)
                     
                     # Получаем актуальный max_id
                     reloaded_ids = get_all_notice_ids(driver)
