@@ -33,9 +33,15 @@ async def test_playwright():
             print("\n3. Parsing HTML with BeautifulSoup...")
             soup = BeautifulSoup(html, 'html.parser')
             
-            # Try to find news IDs
-            links = soup.select('tr a[href*="/service_center/notice"]')
+            # Try to find news IDs with CORRECTED selector
+            links = soup.select('a[href*="/service_center/notice?id="]')
             print(f"✓ Found {len(links)} news links")
+            
+            if len(links) == 0:
+                # Fallback
+                print("   Primary selector failed, trying regex fallback...")
+                links = soup.find_all('a', href=re.compile(r'/service_center/notice\?id=\d+'))
+                print(f"✓ Fallback regex found {len(links)} news links")
             
             if len(links) == 0:
                 print("\n4. Analyzing page structure...")

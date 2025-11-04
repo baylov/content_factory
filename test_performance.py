@@ -68,7 +68,7 @@ def test_optimized_load():
         
         wait_start = time.time()
         wait = WebDriverWait(driver, 5)
-        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+        wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href*="/service_center/notice?id="]')))
         wait_time = time.time() - wait_start
         
         total_time = time.time() - start
@@ -88,7 +88,7 @@ def test_optimized_load():
         
         # Проверяем что список загрузился
         js_code = """
-        const links = document.querySelectorAll('tr a[href*="/service_center/notice"]');
+        const links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
         return links.length;
         """
         links_count = driver.execute_script(js_code)
@@ -106,7 +106,7 @@ def test_optimized_load():
             
             wait_start = time.time()
             wait = WebDriverWait(driver, 3)
-            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'a[href*="/service_center/notice?id="]')))
             wait_time = time.time() - wait_start
             
             total_time = time.time() - start
