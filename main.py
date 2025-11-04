@@ -313,16 +313,36 @@ def debug_save_html_and_find_selectors(driver):
 
 def wait_for_notices_js(driver, max_wait=0.3):
     """
-    Ждет появления новостей, проверяя каждые 20ms
-    Возвращает True если новости появились, False если timeout
+    Ждет появления новостей, проверяя каждые 20ms.
+    Использует те же fallback стратегии, что и get_all_notice_ids().
+    Возвращает True если новости появились, False если timeout.
     """
     start = time.time()
     check_interval = 0.02  # 20ms
     
     while time.time() - start < max_wait:
         try:
+            # Используем те же стратегии, что и в get_all_notice_ids
             count = driver.execute_script("""
-                return document.querySelectorAll('a[href*="/service_center/notice"]').length;
+                // Стратегия 1: Точный селектор с ?id=
+                let count = document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
+                
+                // Стратегия 2: Любые ссылки с notice
+                if (count === 0) {
+                    count = document.querySelectorAll('a[href*="/service_center/notice"]').length;
+                }
+                
+                // Стратегия 3: Ссылки в таблице
+                if (count === 0) {
+                    count = document.querySelectorAll('tr a[href*="notice"]').length;
+                }
+                
+                // Стратегия 4: Любые ссылки с id=
+                if (count === 0) {
+                    count = document.querySelectorAll('a[href*="id="]').length;
+                }
+                
+                return count;
             """)
             
             if count > 0:
@@ -348,35 +368,41 @@ def get_all_notice_ids(driver):
     
     Возвращает список ID незакрепленных новостей: [5710, 5709, 5701, ...]
     При ошибке автоматически запускает диагностику.
+    
+    Fallback стратегии совпадают с диагностикой:
+    1. exact_id - точный селектор с ?id=
+    2. all_notice - любые ссылки с /service_center/notice
+    3. tr_notice - ссылки в таблице
+    4. any_id - любые ссылки с параметром id=
     """
     start_time = time.time()
     
     try:
-        # JavaScript код с несколькими стратегиями поиска
+        # JavaScript код с несколькими стратегиями поиска (как в диагностике!)
         result = driver.execute_script("""
-            // Стратегия 1: Точный селектор с id параметром
+            // Стратегия 1: Точный селектор с id параметром (самый надёжный)
             let links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
             let strategy = 'exact_id';
             
-            // Стратегия 2: Если не нашли - любые ссылки с notice
+            // Стратегия 2: Любые ссылки с notice (как в диагностике!)
             if (links.length === 0) {
                 links = document.querySelectorAll('a[href*="/service_center/notice"]');
-                strategy = 'notice_links';
+                strategy = 'all_notice';
             }
             
-            // Стратегия 3: Если все еще не нашли - ссылки в tr с notice
+            // Стратегия 3: Ссылки в таблице с notice
             if (links.length === 0) {
                 links = document.querySelectorAll('tr a[href*="notice"]');
                 strategy = 'tr_notice';
             }
             
-            // Стратегия 4: Если все еще не нашли - любые ссылки с id= параметром
+            // Стратегия 4: Любые ссылки с id= параметром
             if (links.length === 0) {
                 links = document.querySelectorAll('a[href*="id="]');
                 strategy = 'any_id';
             }
             
-            console.log('Strategy used:', strategy, 'Links found:', links.length);
+            console.log('Strategy used:', strategy, 'Total links found:', links.length);
             
             const notices = [];
             
@@ -453,7 +479,7 @@ def get_all_notice_ids(driver):
         # Извлекаем только ID
         notice_ids = [n['id'] for n in result['notices']]
         
-        # Детальное логирование
+        # Детальное логирование (показываем стратегию и количество ссылок)
         logging.info(f"✅ Найдено {result['count']} новостей (strategy: {result['strategy']}, total links: {result['totalLinks']})")
         logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
         logging.info(f"⏱️ Время парсинга: {parse_time:.3f}s")
@@ -1135,12 +1161,30 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
         logging.error(f"❌ Ошибка загрузки страницы для HTML fallback: {load_error}")
         return [], "FAILED", {"total": time.time() - start_time}
     
-    # БЫСТРАЯ ПРОВЕРКА: новости уже есть?
+    # БЫСТРАЯ ПРОВЕРКА: новости уже есть? (используем те же fallback стратегии)
     wait_start = time.time()
     quick_check_start = time.time()
     try:
         count = driver.execute_script("""
-            return document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
+            // Стратегия 1: Точный селектор с ?id=
+            let count = document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
+            
+            // Стратегия 2: Любые ссылки с notice
+            if (count === 0) {
+                count = document.querySelectorAll('a[href*="/service_center/notice"]').length;
+            }
+            
+            // Стратегия 3: Ссылки в таблице
+            if (count === 0) {
+                count = document.querySelectorAll('tr a[href*="notice"]').length;
+            }
+            
+            // Стратегия 4: Любые ссылки с id=
+            if (count === 0) {
+                count = document.querySelectorAll('a[href*="id="]').length;
+            }
+            
+            return count;
         """)
         quick_check_time = (time.time() - quick_check_start) * 1000
         
