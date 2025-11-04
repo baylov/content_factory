@@ -311,13 +311,13 @@ def debug_save_html_and_find_selectors(driver):
         return None
 
 
-def wait_for_notices_js(driver, max_wait=1.0):
+def wait_for_notices_js(driver, max_wait=0.3):
     """
-    Ждет появления новостей, проверяя каждые 50ms
+    Ждет появления новостей, проверяя каждые 20ms
     Возвращает True если новости появились, False если timeout
     """
     start = time.time()
-    check_interval = 0.05  # 50ms
+    check_interval = 0.02  # 20ms
     
     while time.time() - start < max_wait:
         try:
@@ -1135,13 +1135,31 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
         logging.error(f"❌ Ошибка загрузки страницы для HTML fallback: {load_error}")
         return [], "FAILED", {"total": time.time() - start_time}
     
+    # БЫСТРАЯ ПРОВЕРКА: новости уже есть?
     wait_start = time.time()
-    notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
-    wait_time = time.time() - wait_start
-    
-    if not notices_appeared:
-        logging.warning("  ⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
-        time.sleep(0.5)
+    quick_check_start = time.time()
+    try:
+        count = driver.execute_script("""
+            return document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
+        """)
+        quick_check_time = (time.time() - quick_check_start) * 1000
+        
+        if count > 0:
+            # Новости УЖЕ ЕСТЬ! Не ждём дополнительно
+            wait_time = time.time() - wait_start
+            logging.info(f"⚡ Новости в HTML сразу после refresh ({quick_check_time:.0f}ms) - пропускаем ожидание")
+        else:
+            # Ждём появления
+            logging.info(f"⏳ Новости не найдены сразу ({quick_check_time:.0f}ms) - ждём...")
+            notices_appeared = wait_for_notices_js(driver, max_wait=0.3)
+            wait_time = time.time() - wait_start
+            
+            if not notices_appeared:
+                logging.warning(f"  ⚠️ Новости не появились за 0.3s")
+    except Exception as check_error:
+        # Если быстрая проверка не сработала, используем обычное ожидание
+        logging.debug(f"Быстрая проверка не удалась: {check_error}, используем обычное ожидание")
+        notices_appeared = wait_for_notices_js(driver, max_wait=0.3)
         wait_time = time.time() - wait_start
     
     logging.info(f"  ⏱️ Ожидание новостей (HTML): {wait_time:.3f}s")
@@ -1174,7 +1192,7 @@ def main():
     logging.info("📡 Режим: ОПТИМИЗИРОВАННЫЙ HTML ПАРСИНГ")
     logging.info("  ✓ CDP API отключён (временно)")
     logging.info("  ✓ Прямой HTML парсинг")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 1.5-2 секунды")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1.5 секунды")
     logging.info("")
     logging.info("🔄 Интервал проверки: 1-2 секунды")
     logging.info("")
@@ -1182,7 +1200,8 @@ def main():
     logging.info("  ✓ Selenium headless Chrome с STEALTH")
     logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
-    logging.info("  ✓ Умное ожидание (polling 50ms)")
+    logging.info("  ✓ Быстрая проверка сразу после refresh")
+    logging.info("  ✓ Умное ожидание (polling 20ms, max 0.3s)")
     logging.info("  ✓ Быстрый HTML парсинг")
     logging.info("  ✓ Автодиагностика при ошибках")
     logging.info("  ✓ Детальные метрики на каждом этапе")
