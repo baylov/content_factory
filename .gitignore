@@ -7,4 +7,5 @@ debug_first_row.html
 upbit_page_debug.html
 upbit_debug.html
 api_discovery.json
+upbit_realtime_discovery.json
 venv/
