@@ -193,7 +193,16 @@ class UpbitParser:
         
         try:
             # Переход на страницу (используем ту же page, не создаём новую!)
-            await self.page.goto(UPBIT_NOTICE_URL, wait_until='networkidle')
+            await self.page.goto(
+                UPBIT_NOTICE_URL,
+                wait_until='networkidle',
+                timeout=10000
+            )
+            
+            # Проверяем визуальные индикаторы ошибок
+            error_indicators = await self.page.query_selector_all('.error, .alert-error')
+            if error_indicators:
+                logging.warning("⚠️ На странице обнаружены индикаторы ошибки")
             
             # Дополнительное ожидание для полной загрузки JS-контента
             await self.page.wait_for_timeout(1000)
@@ -201,17 +210,31 @@ class UpbitParser:
             load_time = time.time() - start_time
             logging.info(f"⏱️ Время загрузки страницы: {load_time:.3f}s")
             
-            # Проверка на ошибки на странице
+            if load_time > 3:
+                logging.error(f"❌ МЕДЛЕННО: Загрузка {load_time:.3f} сек")
+            elif load_time < 1:
+                logging.info(f"⚡ БЫСТРО: Загрузка {load_time:.3f} сек")
+            
+            # Проверка текста страницы на ошибки
             error_text = await self.page.evaluate('''() => {
                 return document.body.innerText;
             }''')
             
             if '알 수 없는 오류' in error_text or '오류가 발생' in error_text:
-                logging.error("❌ Страница показывает ошибку")
-                return None, load_time
+                logging.error("❌ Страница показывает ошибку в тексте")
             
             # Извлечение HTML
             html = await self.page.content()
+            
+            # === Сохранение HTML для отладки ===
+            debug_file = 'upbit_page_debug.html'
+            try:
+                with open(debug_file, 'w', encoding='utf-8') as f:
+                    f.write(html)
+                logging.info(f"💾 DEBUG: HTML сохранён в {debug_file}")
+            except Exception as e:
+                logging.warning(f"⚠️ Не удалось сохранить debug HTML: {e}")
+            # === КОНЕЦ ДОБАВЛЕНИЯ ===
             
             return html, load_time
             
@@ -243,8 +266,13 @@ def get_all_notice_ids(soup):
     Возвращает список ID: [5710, 5709, 5701, 5696, ...]
     """
     try:
-        # Ищем все ссылки на новости в таблице
-        links = soup.select('tr a[href*="/service_center/notice"]')
+        # ИСПРАВЛЕННЫЙ СЕЛЕКТОР: Точный селектор с параметром id
+        links = soup.select('a[href*="/service_center/notice?id="]')
+        
+        # Fallback: если первый селектор не сработал
+        if not links:
+            logging.warning("[get_all_notice_ids] Основной селектор не сработал, пробуем regex")
+            links = soup.find_all('a', href=re.compile(r'/service_center/notice\?id=\d+'))
         
         ids = []
         for link in links:
@@ -259,28 +287,39 @@ def get_all_notice_ids(soup):
             return ids
         else:
             logging.warning("[get_all_notice_ids] ID не найдены")
-            # Альтернативный поиск если первый селектор не сработал
-            all_links = soup.find_all('a', href=re.compile(r'id=\d+'))
-            if all_links:
-                alt_ids = []
-                for link in all_links:
-                    href = link.get('href', '')
-                    if 'notice' in href.lower():
-                        match = re.search(r'id=(\d+)', href)
-                        if match:
-                            alt_ids.append(int(match.group(1)))
-                if alt_ids:
-                    logging.info(f"[get_all_notice_ids] Найдено ID (альтернативный поиск): {alt_ids[:5]}... (всего {len(alt_ids)})")
-                    return alt_ids
-            # DEBUG: показываем что вообще есть на странице
+            
+            # DEBUG: детальная информация
             all_links = soup.find_all('a', href=True)
             logging.info(f"[DEBUG] Всего ссылок на странице: {len(all_links)}")
+            
             if all_links:
-                sample = [f"{l.get_text(strip=True)[:30]} -> {l['href'][:50]}" for l in all_links[:3]]
-                logging.info(f"[DEBUG] Примеры ссылок: {sample}")
+                # Показываем первые 5 ссылок
+                sample = []
+                for l in all_links[:5]:
+                    text = l.get_text(strip=True)[:30]
+                    href = l['href'][:50]
+                    sample.append(f"{text} -> {href}")
+                logging.info(f"[DEBUG] Примеры ссылок:")
+                for s in sample:
+                    logging.info(f"[DEBUG]   {s}")
+            
+            # Ищем специфичные для Upbit элементы
+            notice_divs = soup.find_all('div', class_=re.compile('notice|board|list', re.I))
+            logging.info(f"[DEBUG] Divs с классами notice/board/list: {len(notice_divs)}")
+            
+            # Проверяем на сообщения об ошибках
+            error_texts = soup.find_all(string=re.compile('오류|error|차단|block', re.I))
+            if error_texts:
+                logging.error(f"[DEBUG] Обнаружены сообщения об ошибках на странице:")
+                for err in error_texts[:3]:
+                    logging.error(f"[DEBUG]   {err.strip()[:100]}")
+            
             return []
+            
     except Exception as e:
         logging.error(f"[get_all_notice_ids] Ошибка: {e}")
+        import traceback
+        logging.error(f"[DEBUG] Traceback: {traceback.format_exc()}")
         return []
 
 
@@ -330,7 +369,7 @@ def get_unpinned_notice_ids(soup):
                 continue
             
             # Ищем ссылку на новость
-            link = row.select_one('a[href*="/service_center/notice"]')
+            link = row.select_one('a[href*="/service_center/notice?id="]')
             if link:
                 href = link.get('href', '')
                 match = re.search(r'id=(\d+)', href)
@@ -356,7 +395,7 @@ def get_notice_by_id(soup, notice_id):
     """
     try:
         # Ищем все ссылки на новости
-        links = soup.select('tr a[href*="/service_center/notice"]')
+        links = soup.select('a[href*="/service_center/notice?id="]')
         
         for link in links:
             href = link.get('href', '')
@@ -365,7 +404,7 @@ def get_notice_by_id(soup, notice_id):
             if match and int(match.group(1)) == notice_id:
                 # Извлекаем заголовок
                 # Сначала пробуем найти span с заголовком
-                title_span = link.select_one('span.css-qju2q6, span[class*="title"]')
+                title_span = link.select_one('span.css-qju2q6, span.css-twx20f, span[class*="title"]')
                 if title_span:
                     title = title_span.get_text(strip=True)
                 else:
