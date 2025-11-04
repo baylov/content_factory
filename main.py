@@ -13,7 +13,6 @@ from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -159,16 +158,15 @@ def init_driver(enable_cdp=False):
         chrome_options.add_argument('--disable-breakpad')
         chrome_options.add_argument('--disable-crash-reporter')
         
-        # CDP logging - включаем только если необходимо
+        # CDP logging - включаем только если необходимо (Selenium 4.x синтаксис)
         if enable_cdp:
             chrome_options.add_argument('--enable-logging')
             chrome_options.add_argument('--v=1')
-            capabilities = DesiredCapabilities.CHROME.copy()
-            capabilities['goog:loggingPrefs'] = {'performance': 'ALL'}
+            # Selenium 4.x: используем set_capability вместо desired_capabilities
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
         else:
             chrome_options.add_argument('--disable-logging')
             chrome_options.add_argument('--log-level=3')
-            capabilities = None
         
         # Блокировка всех медиа и ненужных ресурсов через prefs
         prefs = {
@@ -194,11 +192,8 @@ def init_driver(enable_cdp=False):
 
         service = Service(ChromeDriverManager().install())
         
-        # Создаем драйвер с capabilities если CDP включен
-        if capabilities:
-            driver = webdriver.Chrome(service=service, options=chrome_options, desired_capabilities=capabilities)
-        else:
-            driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Selenium 4.x: только service и options (desired_capabilities убран!)
+        driver = webdriver.Chrome(service=service, options=chrome_options)
 
         # Применяем STEALTH для обхода детекции автоматизации
         stealth(driver,
