@@ -259,6 +259,25 @@ def get_all_notice_ids(soup):
             return ids
         else:
             logging.warning("[get_all_notice_ids] ID не найдены")
+            # Альтернативный поиск если первый селектор не сработал
+            all_links = soup.find_all('a', href=re.compile(r'id=\d+'))
+            if all_links:
+                alt_ids = []
+                for link in all_links:
+                    href = link.get('href', '')
+                    if 'notice' in href.lower():
+                        match = re.search(r'id=(\d+)', href)
+                        if match:
+                            alt_ids.append(int(match.group(1)))
+                if alt_ids:
+                    logging.info(f"[get_all_notice_ids] Найдено ID (альтернативный поиск): {alt_ids[:5]}... (всего {len(alt_ids)})")
+                    return alt_ids
+            # DEBUG: показываем что вообще есть на странице
+            all_links = soup.find_all('a', href=True)
+            logging.info(f"[DEBUG] Всего ссылок на странице: {len(all_links)}")
+            if all_links:
+                sample = [f"{l.get_text(strip=True)[:30]} -> {l['href'][:50]}" for l in all_links[:3]]
+                logging.info(f"[DEBUG] Примеры ссылок: {sample}")
             return []
     except Exception as e:
         logging.error(f"[get_all_notice_ids] Ошибка: {e}")
