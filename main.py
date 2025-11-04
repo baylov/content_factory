@@ -361,132 +361,134 @@ def wait_for_notices_js(driver, max_wait=0.3):
 
 def get_all_notice_ids(driver):
     """
-    Извлекает ID новостей через JavaScript с умными fallback стратегиями.
-    Синхронизировано с диагностикой - использует ТОЧНО ТУ ЖЕ логику.
+    Извлекает ID новостей ТОЧНО как диагностика - множественные простые JavaScript вызовы.
+    Фильтрация и обработка выполняется в Python, не в JavaScript!
     
-    Приоритет 1: НАЙТИ новости (правильный селектор)
-    Приоритет 2: Сделать быстро (< 1 сек)
+    Приоритет 1: НАДЕЖНОСТЬ (как диагностика - всегда работает)
+    Приоритет 2: СКОРОСТЬ (< 0.5 сек парсинг)
     
     Возвращает список ID незакрепленных новостей: [5710, 5709, 5701, ...]
     При ошибке автоматически запускает диагностику.
     
-    Fallback стратегии совпадают с диагностикой:
+    Fallback стратегии (те же что в диагностике):
     1. exact_id - точный селектор с ?id=
     2. all_notice - любые ссылки с /service_center/notice
     3. tr_notice - ссылки в таблице
     4. any_id - любые ссылки с параметром id=
     """
-    start_time = time.time()
+    parse_start = time.time()
     
     try:
-        # JavaScript код с явным тестированием каждой стратегии (как в диагностике!)
-        result = driver.execute_script("""
-            // === СТРАТЕГИЯ 1: Точный селектор с ?id= ===
-            let links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
-            let strategy = 'exact_id';
-            
-            console.log('Strategy 1 (exact_id):', links.length, 'links');
-            
-            // === СТРАТЕГИЯ 2: Все notice ссылки ===
-            if (links.length === 0) {
-                links = document.querySelectorAll('a[href*="/service_center/notice"]');
-                strategy = 'all_notice';
-                console.log('Strategy 2 (all_notice):', links.length, 'links');
-            }
-            
-            // === СТРАТЕГИЯ 3: tr a с notice ===
-            if (links.length === 0) {
-                links = document.querySelectorAll('tr a[href*="notice"]');
-                strategy = 'tr_notice';
-                console.log('Strategy 3 (tr_notice):', links.length, 'links');
-            }
-            
-            // === СТРАТЕГИЯ 4: любые a с id= ===
-            if (links.length === 0) {
-                links = document.querySelectorAll('a[href*="id="]');
-                strategy = 'any_id';
-                console.log('Strategy 4 (any_id):', links.length, 'links');
-            }
-            
-            const notices = [];
-            const allLinks = links.length;
-            
-            // === ИЗВЛЕЧЕНИЕ ID И ФИЛЬТРАЦИЯ ===
-            for (let i = 0; i < links.length; i++) {
-                const link = links[i];
-                const href = link.getAttribute('href');
-                
-                if (!href) continue;
-                
-                // Извлекаем ID
-                const match = href.match(/id=(\\d+)/);
-                if (!match) continue;
-                
-                const id = parseInt(match[1]);
-                const title = link.textContent.trim();
-                
-                // === ПРОВЕРКА НА ЗАКРЕПЛЕННОСТЬ ===
-                let isPinned = false;
-                
-                // Способ 1: Текст в родительском элементе
-                const row = link.closest('tr') || link.closest('div') || link.parentElement;
-                if (row) {
-                    const rowText = row.textContent;
-                    
-                    // Проверка на маркер 공지
-                    if (rowText.includes('공지')) {
-                        isPinned = true;
-                    }
-                    
-                    // Способ 2: Иконка pin
-                    if (!isPinned) {
-                        const pinIcon = row.querySelector('[class*="pin"]') || 
-                                       row.querySelector('[class*="fixed"]') ||
-                                       row.querySelector('svg[class*="pin"]');
-                        if (pinIcon) {
-                            isPinned = true;
-                        }
-                    }
-                }
-                
-                // Добавляем только незакрепленные
-                if (!isPinned) {
-                    notices.push({
-                        id: id,
-                        title: title.substring(0, 50)
-                    });
-                }
-            }
-            
-            return {
-                success: notices.length > 0,
-                count: notices.length,
-                ids: notices.map(n => n.id),
-                strategy: strategy,
-                totalLinks: allLinks,
-                samples: notices.slice(0, 3)
-            };
+        # === СТРАТЕГИЯ 1: Точный селектор (как в диагностике) ===
+        links = driver.execute_script("""
+            return Array.from(document.querySelectorAll('a[href*="/service_center/notice?id="]'))
+                .map(link => ({
+                    href: link.getAttribute('href'),
+                    text: link.textContent.trim()
+                }));
         """)
         
-        parse_time = time.time() - start_time
+        strategy = 'exact_id'
+        total_links = len(links)
         
-        # === ОБРАБОТКА РЕЗУЛЬТАТА ===
-        if not result['success']:
+        logging.info(f"🔍 Strategy 1 (exact_id): {total_links} links")
+        
+        # === СТРАТЕГИЯ 2: Все notice ссылки (fallback) ===
+        if len(links) == 0:
+            links = driver.execute_script("""
+                return Array.from(document.querySelectorAll('a[href*="/service_center/notice"]'))
+                    .map(link => ({
+                        href: link.getAttribute('href'),
+                        text: link.textContent.trim()
+                    }));
+            """)
+            strategy = 'all_notice'
+            total_links = len(links)
+            logging.info(f"🔍 Strategy 2 (all_notice): {total_links} links")
+        
+        # === СТРАТЕГИЯ 3: tr a с notice (fallback) ===
+        if len(links) == 0:
+            links = driver.execute_script("""
+                return Array.from(document.querySelectorAll('tr a[href*="notice"]'))
+                    .map(link => ({
+                        href: link.getAttribute('href'),
+                        text: link.textContent.trim()
+                    }));
+            """)
+            strategy = 'tr_notice'
+            total_links = len(links)
+            logging.info(f"🔍 Strategy 3 (tr_notice): {total_links} links")
+        
+        # === СТРАТЕГИЯ 4: любые a с id= (последний fallback) ===
+        if len(links) == 0:
+            links = driver.execute_script("""
+                return Array.from(document.querySelectorAll('a[href*="id="]'))
+                    .map(link => ({
+                        href: link.getAttribute('href'),
+                        text: link.textContent.trim()
+                    }));
+            """)
+            strategy = 'any_id'
+            total_links = len(links)
+            logging.info(f"🔍 Strategy 4 (any_id): {total_links} links")
+        
+        # === ИЗВЛЕЧЕНИЕ ID в Python (не в JavaScript!) ===
+        notice_ids = []
+        samples = []
+        
+        for link in links:
+            href = link.get('href', '')
+            text = link.get('text', '')
+            
+            # Извлекаем ID через regex в Python
+            match = re.search(r'id=(\d+)', href)
+            if not match:
+                continue
+            
+            notice_id = int(match.group(1))
+            
+            # === ПРОВЕРКА НА ЗАКРЕПЛЕННОСТЬ (в Python!) ===
+            is_pinned = False
+            
+            # Метод 1: Текст содержит маркер
+            if '공지' in text:
+                is_pinned = True
+            
+            # Метод 2: Текст слишком короткий (навигация)
+            if len(text) < 5:
+                is_pinned = True
+            
+            # Добавляем только незакрепленные
+            if not is_pinned:
+                notice_ids.append(notice_id)
+                
+                # Сохраняем примеры
+                if len(samples) < 3:
+                    samples.append({
+                        'id': notice_id,
+                        'title': text[:50]
+                    })
+        
+        parse_time = time.time() - parse_start
+        
+        # === ПРОВЕРКА РЕЗУЛЬТАТА ===
+        if len(notice_ids) == 0:
             logging.error(f"❌ Новости не найдены!")
-            logging.error(f"   Strategy: {result['strategy']}")
-            logging.error(f"   Total links found: {result['totalLinks']}")
+            logging.error(f"   Strategy: {strategy}")
+            logging.error(f"   Total links found: {total_links}")
+            logging.error(f"   После фильтрации: {len(notice_ids)}")
             logging.error("💡 Запускаем диагностику...")
             debug_save_html_and_find_selectors(driver)
             return []
         
-        # Успех!
-        logging.info(f"✅ Найдено {result['count']} новостей (strategy: {result['strategy']}, total links: {result['totalLinks']})")
-        logging.info(f"🔢 ID: {result['ids'][:5]}{'...' if len(result['ids']) > 5 else ''}")
+        # === УСПЕХ! ===
+        logging.info(f"✅ Найдено {len(notice_ids)} новостей (strategy: {strategy}, total links: {total_links})")
+        logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
         
         # Примеры новостей
-        if result.get('samples'):
+        if samples:
             logging.info("📋 Примеры:")
-            for sample in result['samples']:
+            for sample in samples:
                 logging.info(f"   • ID:{sample['id']} - {sample['title']}")
         
         logging.info(f"⏱️ Время парсинга: {parse_time:.3f}s")
@@ -499,10 +501,10 @@ def get_all_notice_ids(driver):
         else:
             logging.info(f"⚡ Отлично: {parse_time:.3f}s < 0.5s!")
         
-        return result['ids']
+        return notice_ids
         
     except Exception as e:
-        parse_time = time.time() - start_time
+        parse_time = time.time() - parse_start
         logging.error(f"❌ Ошибка парсинга (время: {parse_time:.3f}s): {e}")
         import traceback
         logging.error(traceback.format_exc())
