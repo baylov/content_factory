@@ -13,6 +13,7 @@ from dotenv import load_dotenv
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.desired_capabilities import DesiredCapabilities
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -162,10 +163,12 @@ def init_driver(enable_cdp=False):
         if enable_cdp:
             chrome_options.add_argument('--enable-logging')
             chrome_options.add_argument('--v=1')
-            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+            capabilities = DesiredCapabilities.CHROME.copy()
+            capabilities['goog:loggingPrefs'] = {'performance': 'ALL'}
         else:
             chrome_options.add_argument('--disable-logging')
             chrome_options.add_argument('--log-level=3')
+            capabilities = None
         
         # Блокировка всех медиа и ненужных ресурсов через prefs
         prefs = {
@@ -190,7 +193,12 @@ def init_driver(enable_cdp=False):
         chrome_options.add_experimental_option('useAutomationExtension', False)
 
         service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=chrome_options)
+        
+        # Создаем драйвер с capabilities если CDP включен
+        if capabilities:
+            driver = webdriver.Chrome(service=service, options=chrome_options, desired_capabilities=capabilities)
+        else:
+            driver = webdriver.Chrome(service=service, options=chrome_options)
 
         # Применяем STEALTH для обхода детекции автоматизации
         stealth(driver,
@@ -724,7 +732,48 @@ def extract_ids_from_json(data):
     return notice_ids
 
 
-def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
+def load_known_endpoints():
+    """
+    Загружает известные API endpoints из api_discovery.json
+    
+    Returns:
+        list: Список URL endpoints (может быть пустым)
+    """
+    endpoints = []
+    try:
+        if not os.path.exists('api_discovery.json'):
+            return endpoints
+        
+        with open('api_discovery.json', 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and item.get('url'):
+                    endpoints.append(item['url'])
+        elif isinstance(data, dict):
+            if data.get('api_candidates'):
+                endpoints.extend(item['url'] for item in data['api_candidates'] if isinstance(item, dict) and item.get('url'))
+            elif data.get('json_responses'):
+                endpoints.extend(item['url'] for item in data['json_responses'] if isinstance(item, dict) and item.get('url'))
+        
+        # Удаляем пустые и дубли
+        endpoints = [url for url in endpoints if url]
+        endpoints = list(dict.fromkeys(endpoints))
+        
+        if endpoints:
+            logging.info(f"📋 Загружено {len(endpoints)} известных API endpoints")
+        else:
+            logging.info("📋 Известные API endpoints не обнаружены в файле")
+        
+        return endpoints
+    
+    except Exception as e:
+        logging.warning(f"⚠️ Ошибка загрузки api_discovery.json: {e}")
+        return endpoints
+
+
+def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0, return_details=False):
     """
     Получает новости через перехват API запросов используя CDP
     
@@ -732,11 +781,13 @@ def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
         driver: Selenium WebDriver с включенным CDP
         known_endpoints: Список известных API endpoints (опционально)
         max_wait: Максимальное время ожидания API запроса (сек)
+        return_details: Возвращать ли дополнительные метрики (dict)
     
     Returns:
-        list: Список ID новостей или пустой список при ошибке
+        list | tuple: Список ID новостей или (list, details) если return_details=True
     """
     start_time = time.time()
+    known_endpoints = known_endpoints or []
     
     try:
         # Загружаем страницу
@@ -744,7 +795,9 @@ def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
         driver.get(UPBIT_NOTICE_URL)
         page_load_time = time.time() - page_load_start
         
-        logging.info(f"  ⏱️ Загрузка страницы: {page_load_time:.3f}s")
+        logging.info(f"  ⏱️ Загрузка страницы (API): {page_load_time:.3f}s")
+        if known_endpoints:
+            logging.info(f"  📋 Используем {len(known_endpoints)} известных endpoints для фильтрации")
         
         # Ждём появления API запросов
         wait_start = time.time()
@@ -787,10 +840,10 @@ def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
                                         # Парсим JSON
                                         notices_data = json.loads(body_text)
                                         api_url_found = url
-                                        logging.info(f"✅ API запрос перехвачен: {url[:80]}...")
+                                        logging.info(f"✅ API запрос перехвачен: {url[:120]}...")
                                         break
                                 
-                                except Exception as body_error:
+                                except Exception:
                                     # Тело ответа может быть недоступно - пропускаем
                                     continue
                     
@@ -817,34 +870,36 @@ def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
             total_time = time.time() - start_time
             
             if notice_ids:
-                logging.info(f"⚡ API PARSING SUCCESS!")
-                logging.info(f"  📡 Endpoint: {api_url_found[:80]}...")
-                logging.info(f"  🔢 Найдено ID: {len(notice_ids)} → {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
-                logging.info(f"  ⏱️ Время: Load {page_load_time:.3f}s + Wait {wait_time:.3f}s + Parse {parse_time:.3f}s = {total_time:.3f}s")
+                logging.info(f"  ⏱️ API запрос: {wait_time:.3f}s")
+                logging.info(f"  ⏱️ Парсинг JSON: {parse_time:.3f}s")
+                logging.info(f"✅ Найдено {len(notice_ids)} новостей (strategy: API)")
+                logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
+                logging.info(f"⚡ API MODE: Load {page_load_time:.3f}s + API {wait_time:.3f}s + Parse {parse_time:.3f}s = {total_time:.3f}s")
                 
-                if total_time < 1.0:
-                    logging.info("  ✅ ⚡ ОТЛИЧНО: < 1 секунды!")
-                elif total_time < 1.5:
-                    logging.info("  ✅ ХОРОШО: < 1.5 секунд")
-                else:
-                    logging.info("  ⚠️ ПРИЕМЛЕМО: < 2 секунд")
+                details = {
+                    "endpoint": api_url_found,
+                    "page_load_time": page_load_time,
+                    "wait_time": wait_time,
+                    "parse_time": parse_time,
+                    "total_time": total_time,
+                }
                 
-                return notice_ids
+                return (notice_ids, details) if return_details else notice_ids
             else:
-                logging.warning(f"⚠️ API перехвачен, но ID не извлечены (неизвестная структура)")
-                logging.warning(f"   → Fallback на HTML парсинг")
-                return None
+                logging.warning("⚠️ API перехвачен, но ID не извлечены (неизвестная структура)")
+                logging.warning("   → Fallback на HTML парсинг")
+                return (None, None) if return_details else None
         else:
             elapsed = time.time() - start_time
             logging.warning(f"⚠️ API endpoint не найден за {elapsed:.3f}s")
-            logging.warning(f"   → Fallback на HTML парсинг")
-            return None
+            logging.warning("   → Fallback на HTML парсинг")
+            return (None, None) if return_details else None
     
     except Exception as e:
         elapsed = time.time() - start_time
         logging.error(f"❌ Ошибка перехвата API ({elapsed:.3f}s): {e}")
-        logging.warning(f"   → Fallback на HTML парсинг")
-        return None
+        logging.warning("   → Fallback на HTML парсинг")
+        return (None, None) if return_details else None
 
 
 def get_last_max_id():
@@ -1042,9 +1097,99 @@ def get_refresh_interval():
     return random.uniform(1.0, 2.0)
 
 
+def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
+    """
+    Получает список ID новостей, пытаясь сначала использовать API, затем HTML fallback
+    
+    Args:
+        driver: Selenium WebDriver
+        known_endpoints: Список известных API endpoints
+        use_cdp: Использовать ли CDP API (если False - только HTML)
+    
+    Returns:
+        tuple: (notice_ids: list, method: str, timings: dict)
+    """
+    start_time = time.time()
+    
+    # Пытаемся API если CDP включен
+    if use_cdp:
+        try:
+            api_result, api_details = get_notices_from_api(
+                driver,
+                known_endpoints=known_endpoints,
+                max_wait=2.0,
+                return_details=True
+            )
+            if api_result:
+                total_time = api_details.get("total_time", time.time() - start_time)
+                return api_result, "API", {"total": total_time, "api": api_details}
+            else:
+                logging.warning("⚠️ API не вернул результаты, выполняем HTML fallback")
+        except Exception as e:
+            logging.warning(f"⚠️ Ошибка API: {e}, выполняем HTML fallback")
+    else:
+        logging.info("ℹ️ CDP отключен, используем HTML парсинг")
+    
+    # HTML fallback с измерением времени
+    try:
+        page_load_start = time.time()
+        driver.get(UPBIT_NOTICE_URL)
+        page_load_time = time.time() - page_load_start
+        logging.info(f"  ⏱️ Загрузка страницы (HTML): {page_load_time:.3f}s")
+    except Exception as load_error:
+        logging.error(f"❌ Ошибка загрузки страницы для HTML fallback: {load_error}")
+        return [], "FAILED", {"total": time.time() - start_time}
+    
+    wait_start = time.time()
+    notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
+    wait_time = time.time() - wait_start
+    
+    if not notices_appeared:
+        logging.warning("  ⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
+        time.sleep(0.5)
+        wait_time = time.time() - wait_start
+    
+    logging.info(f"  ⏱️ Ожидание новостей (HTML): {wait_time:.3f}s")
+    
+    parse_start = time.time()
+    notice_ids = get_all_notice_ids(driver)
+    parse_time = time.time() - parse_start
+    
+    total_time = time.time() - start_time
+    html_details = {
+        "page_load": page_load_time,
+        "wait": wait_time,
+        "parse": parse_time,
+    }
+    
+    if notice_ids:
+        logging.info(f"✅ HTML MODE: Получено {len(notice_ids)} ID за {total_time:.3f}s")
+    
+    return notice_ids, "HTML", {"total": total_time, "html": html_details}
+
+
 def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: ULTRA-FAST JS PARSER + SMART SELECTOR CHECK")
+    logging.info("")
+    
+    # Проверяем наличие api_discovery.json и загружаем endpoints
+    known_endpoints = load_known_endpoints()
+    use_cdp = True  # По умолчанию используем CDP API
+    
+    if known_endpoints:
+        logging.info("📡 Режим: CDP API ПЕРЕХВАТ")
+        logging.info("  ✓ Network tracking enabled")
+        logging.info(f"  ✓ Известных API endpoints: {len(known_endpoints)}")
+        logging.info("  ✓ HTML fallback активен")
+        logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1 секунда")
+    else:
+        logging.info("📡 Режим: CDP API DISCOVERY")
+        logging.info("  ✓ Network tracking enabled")
+        logging.info("  ⚠️ Известных API endpoints: 0 (запускаем discovery)")
+        logging.info("  ✓ HTML fallback активен")
+        logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1-2 секунды")
+    
+    logging.info("")
     logging.info("🔄 Интервал проверки: 1-2 секунды")
     logging.info("")
     logging.info("⚡ ОПТИМИЗАЦИИ:")
@@ -1052,16 +1197,28 @@ def main():
     logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
     logging.info("  ✓ Умное ожидание (polling 50ms)")
-    logging.info("  ✓ JavaScript парсинг с fallback стратегиями")
+    logging.info("  ✓ API перехват (приоритет) → HTML парсинг (fallback)")
     logging.info("  ✓ Автодиагностика при ошибках")
     logging.info("  ✓ Детальные метрики на каждом этапе")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1 сек на цикл")
     logging.info("")
     
-    driver = init_driver()
+    # Инициализация драйвера с CDP если нужно
+    driver = init_driver(enable_cdp=use_cdp)
     if not driver:
         logging.error("❌ Не удалось запустить браузер")
         return
+    
+    if use_cdp and not known_endpoints:
+        logging.info("🔍 Запускаем автоматическое обнаружение API endpoints...")
+        try:
+            discover_api_endpoints(driver, save_to_file=True)
+            known_endpoints = load_known_endpoints()
+            if known_endpoints:
+                logging.info(f"📡 Обнаружено и загружено {len(known_endpoints)} endpoints")
+            else:
+                logging.warning("⚠️ API endpoints не обнаружены, используем HTML fallback")
+        except Exception as discovery_error:
+            logging.warning(f"⚠️ Ошибка обнаружения API: {discovery_error}")
     
     # Переменная для отслеживания 429 ошибок
     rate_limit_backoff = 0  # Дополнительная задержка при 429
@@ -1073,45 +1230,31 @@ def main():
         
         cycle_start = time.time()
         
-        # 1. Загрузка страницы
-        page_load_start = time.time()
-        driver.get(UPBIT_NOTICE_URL)
-        page_load_time = time.time() - page_load_start
-        logging.info(f"  ⏱️ Загрузка страницы: {page_load_time:.3f}s")
-        
-        # 2. Умное ожидание появления новостей (polling с проверкой каждые 50ms)
-        wait_start = time.time()
-        notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
-        wait_time = time.time() - wait_start
-        
-        # Fallback: если новости не появились за 0.5s, даём ещё 0.5s
-        if not notices_appeared:
-            logging.warning("⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
-            time.sleep(0.5)
-            wait_time = time.time() - wait_start
-        
-        logging.info(f"  ⏱️ Ожидание новостей: {wait_time:.3f}s")
-        
-        # 3. Парсинг ID (время учтено внутри get_all_notice_ids)
-        parse_start = time.time()
-        all_ids = get_all_notice_ids(driver)
-        parse_time = time.time() - parse_start
+        # Используем API-first подход
+        all_ids, method, timings = get_all_notice_ids_with_api(driver, known_endpoints=known_endpoints, use_cdp=use_cdp)
         
         # Итоговое время всего цикла
         total_cycle_time = time.time() - cycle_start
         
         logging.info(f"⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
-        logging.info(f"   Загрузка: {page_load_time:.3f}s | Ожидание: {wait_time:.3f}s | Парсинг: {parse_time:.3f}s")
+        logging.info(f"   Strategy: {method}")
         
         # Оценка общей производительности
-        if total_cycle_time < 1.0:
-            logging.info("✅ ⚡ ОТЛИЧНО: Полный цикл < 1 сек!")
-        elif total_cycle_time < 1.5:
-            logging.info("✅ ХОРОШО: Полный цикл < 1.5 сек")
-        elif total_cycle_time < 2.0:
-            logging.warning("⚠️ ПРИЕМЛЕМО: Полный цикл 1.5-2 сек")
+        if method == "API" and total_cycle_time < 1.0:
+            logging.info("✅ ⚡ ОТЛИЧНО: API MODE - Полный цикл < 1 сек!")
+        elif method == "API" and total_cycle_time < 1.5:
+            logging.info("✅ ХОРОШО: API MODE - Полный цикл < 1.5 сек")
+        elif method == "HTML" and total_cycle_time < 2.0:
+            logging.info("✅ ПРИЕМЛЕМО: HTML FALLBACK - Полный цикл < 2 сек")
         else:
-            logging.error(f"❌ МЕДЛЕННО: Полный цикл {total_cycle_time:.3f} сек")
+            logging.error(f"❌ МЕДЛЕННО: {method} MODE - Полный цикл {total_cycle_time:.3f} сек")
+        
+        if method == "API":
+            api_info = timings.get("api", {}) if isinstance(timings, dict) else {}
+            endpoint = api_info.get("endpoint")
+            if endpoint and endpoint not in known_endpoints:
+                known_endpoints.append(endpoint)
+                logging.info(f"   📡 Endpoint сохранен: {endpoint[:100]}")
         
         if not all_ids:
             logging.error("❌ Не удалось получить ID новостей")
@@ -1233,66 +1376,46 @@ def main():
                     # Время начала всего цикла refresh
                     cycle_start = time.time()
                     
-                    # 1. Выполняем refresh страницы
-                    refresh_load_start = time.time()
-                    driver.refresh()
-                    refresh_load_time = time.time() - refresh_load_start
-                    logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
-                    
-                    # 2. Умное ожидание появления новостей (polling)
-                    wait_start = time.time()
-                    notices_appeared = wait_for_notices_js(driver, max_wait=0.5)
-                    wait_time = time.time() - wait_start
-                    
-                    # Fallback: если новости не появились за 0.5s, даём ещё 0.5s
-                    if not notices_appeared:
-                        logging.warning("  ⚠️ Новости не появились за 0.5s, даём ещё 0.5s...")
-                        time.sleep(0.5)
-                        wait_time = time.time() - wait_start
-                    
-                    logging.info(f"  ⏱️ Ожидание новостей: {wait_time:.3f}s")
-                    
-                    # 3. Парсинг ID (время учтено внутри get_all_notice_ids)
-                    parse_start = time.time()
-                    all_ids = get_all_notice_ids(driver)
-                    parse_time = time.time() - parse_start
-                    
-                    # Итоговое время всего цикла
+                    all_ids, method, timings = get_all_notice_ids_with_api(driver, known_endpoints=known_endpoints, use_cdp=use_cdp)
                     total_cycle_time = time.time() - cycle_start
                     
                     logging.info(f"  ⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
-                    logging.info(f"     Refresh: {refresh_load_time:.3f}s | Ожидание: {wait_time:.3f}s | Парсинг: {parse_time:.3f}s")
+                    logging.info(f"     Strategy: {method}")
                     
-                    # Оценка производительности
-                    if total_cycle_time < 1.0:
-                        logging.info("  ✅ ⚡ ОТЛИЧНО: Цикл < 1 сек!")
-                    elif total_cycle_time < 1.5:
-                        logging.info("  ✅ ХОРОШО: Цикл < 1.5 сек")
-                    elif total_cycle_time < 2.0:
-                        logging.warning("  ⚠️ ПРИЕМЛЕМО: Цикл 1.5-2 сек")
+                    if method == "API":
+                        logging.info(f"  ⚡ API MODE: Получено за {total_cycle_time:.3f}s")
+                        api_info = timings.get("api", {}) if isinstance(timings, dict) else {}
+                        logging.info(
+                            "     ⏱️ Load {0:.3f}s | API {1:.3f}s | Parse {2:.3f}s".format(
+                                api_info.get("page_load_time", 0.0),
+                                api_info.get("wait_time", 0.0),
+                                api_info.get("parse_time", 0.0)
+                            )
+                        )
+                        endpoint = api_info.get("endpoint")
+                        if endpoint and endpoint not in known_endpoints:
+                            known_endpoints.append(endpoint)
+                            logging.info(f"     📡 Endpoint сохранен: {endpoint[:100]}")
+                    elif method == "HTML":
+                        logging.warning(f"  ⚠️ HTML FALLBACK: Получено за {total_cycle_time:.3f}s")
+                        html_info = timings.get("html", {}) if isinstance(timings, dict) else {}
+                        logging.info(
+                            "     ⏱️ Load {0:.3f}s | Wait {1:.3f}s | Parse {2:.3f}s".format(
+                                html_info.get("page_load", 0.0),
+                                html_info.get("wait", 0.0),
+                                html_info.get("parse", 0.0)
+                            )
+                        )
                     else:
-                        logging.error(f"  ❌ МЕДЛЕННО: Цикл {total_cycle_time:.3f} сек")
+                        logging.error(f"  ❌ {method} MODE: Получено за {total_cycle_time:.3f}s")
                     
-                    # Сбрасываем backoff если refresh успешен
+                    # Сбрасываем backoff если цикл успешен
                     if rate_limit_backoff > 0:
-                        logging.info("✅ Refresh успешен, сбрасываем backoff")
+                        logging.info("✅ Цикл успешен, сбрасываем backoff")
                         rate_limit_backoff = 0
                         last_429_time = None
                     
                 except TimeoutException:
-                    # Проверяем статус код - возможно 429
-                    try:
-                        status_code = driver.execute_script("return document.readyState")
-                        if status_code != "complete":
-                            logging.warning("⚠️ Страница не загрузилась полностью")
-                            # Увеличиваем backoff на 10-30 секунд
-                            rate_limit_backoff = random.uniform(10, 30)
-                            last_429_time = datetime.now()
-                            logging.warning(f"⚠️ Возможна блокировка 429, увеличиваем задержку на {rate_limit_backoff:.1f}с")
-                            continue
-                    except:
-                        pass
-                    
                     logging.warning("⚠️ Timeout при загрузке, пропускаем цикл")
                     continue
                 
@@ -1349,17 +1472,13 @@ def main():
                     except:
                         pass
                     
-                    driver = init_driver()
+                    driver = init_driver(enable_cdp=use_cdp)
                     if not driver:
                         logging.error("❌ Не удалось переинициализировать браузер, останавливаемся")
                         break
                     
-                    # Перезагружаем страницу с умным ожиданием
-                    driver.get(UPBIT_NOTICE_URL)
-                    wait_for_notices_js(driver, max_wait=1.0)
-                    
-                    # Получаем актуальный max_id
-                    reloaded_ids = get_all_notice_ids(driver)
+                    # Получаем актуальный max_id с новым драйвером
+                    reloaded_ids, method, timings = get_all_notice_ids_with_api(driver, known_endpoints=known_endpoints, use_cdp=use_cdp)
                     if reloaded_ids:
                         all_ids = reloaded_ids
                         page_max_id = max(all_ids)
