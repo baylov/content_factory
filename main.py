@@ -362,6 +362,7 @@ def wait_for_notices_js(driver, max_wait=0.3):
 def get_all_notice_ids(driver):
     """
     Извлекает ID новостей через JavaScript с умными fallback стратегиями.
+    Синхронизировано с диагностикой - использует ТОЧНО ТУ ЖЕ логику.
     
     Приоритет 1: НАЙТИ новости (правильный селектор)
     Приоритет 2: Сделать быстро (< 1 сек)
@@ -378,110 +379,116 @@ def get_all_notice_ids(driver):
     start_time = time.time()
     
     try:
-        # JavaScript код с несколькими стратегиями поиска (как в диагностике!)
+        # JavaScript код с явным тестированием каждой стратегии (как в диагностике!)
         result = driver.execute_script("""
-            // Стратегия 1: Точный селектор с id параметром (самый надёжный)
+            // === СТРАТЕГИЯ 1: Точный селектор с ?id= ===
             let links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
             let strategy = 'exact_id';
             
-            // Стратегия 2: Любые ссылки с notice (как в диагностике!)
+            console.log('Strategy 1 (exact_id):', links.length, 'links');
+            
+            // === СТРАТЕГИЯ 2: Все notice ссылки ===
             if (links.length === 0) {
                 links = document.querySelectorAll('a[href*="/service_center/notice"]');
                 strategy = 'all_notice';
+                console.log('Strategy 2 (all_notice):', links.length, 'links');
             }
             
-            // Стратегия 3: Ссылки в таблице с notice
+            // === СТРАТЕГИЯ 3: tr a с notice ===
             if (links.length === 0) {
                 links = document.querySelectorAll('tr a[href*="notice"]');
                 strategy = 'tr_notice';
+                console.log('Strategy 3 (tr_notice):', links.length, 'links');
             }
             
-            // Стратегия 4: Любые ссылки с id= параметром
+            // === СТРАТЕГИЯ 4: любые a с id= ===
             if (links.length === 0) {
                 links = document.querySelectorAll('a[href*="id="]');
                 strategy = 'any_id';
+                console.log('Strategy 4 (any_id):', links.length, 'links');
             }
             
-            console.log('Strategy used:', strategy, 'Total links found:', links.length);
-            
             const notices = [];
+            const allLinks = links.length;
             
-            links.forEach(link => {
+            // === ИЗВЛЕЧЕНИЕ ID И ФИЛЬТРАЦИЯ ===
+            for (let i = 0; i < links.length; i++) {
+                const link = links[i];
                 const href = link.getAttribute('href');
-                if (!href) return;
                 
-                // Извлекаем ID из href
+                if (!href) continue;
+                
+                // Извлекаем ID
                 const match = href.match(/id=(\\d+)/);
-                if (!match) return;
+                if (!match) continue;
                 
                 const id = parseInt(match[1]);
                 const title = link.textContent.trim();
                 
-                // Проверяем закрепленность несколькими способами
+                // === ПРОВЕРКА НА ЗАКРЕПЛЕННОСТЬ ===
                 let isPinned = false;
                 
-                // Способ 1: Проверка текста на маркер 공지 (공지 = "объявление/уведомление" на корейском)
+                // Способ 1: Текст в родительском элементе
                 const row = link.closest('tr') || link.closest('div') || link.parentElement;
                 if (row) {
                     const rowText = row.textContent;
-                    isPinned = rowText.includes('공지');
-                }
-                
-                // Способ 2: Проверка на иконку pin
-                if (!isPinned && row) {
-                    const pinIcon = row.querySelector('[class*="pin"]') || 
-                                   row.querySelector('[class*="fixed"]') ||
-                                   row.querySelector('svg[class*="pin"]');
-                    isPinned = pinIcon !== null;
-                }
-                
-                // Способ 3: Проверка класса row
-                if (!isPinned && row) {
-                    const rowClass = row.className || '';
-                    isPinned = rowClass.includes('pinned') || 
-                              rowClass.includes('fixed') ||
-                              rowClass.includes('notice');
+                    
+                    // Проверка на маркер 공지
+                    if (rowText.includes('공지')) {
+                        isPinned = true;
+                    }
+                    
+                    // Способ 2: Иконка pin
+                    if (!isPinned) {
+                        const pinIcon = row.querySelector('[class*="pin"]') || 
+                                       row.querySelector('[class*="fixed"]') ||
+                                       row.querySelector('svg[class*="pin"]');
+                        if (pinIcon) {
+                            isPinned = true;
+                        }
+                    }
                 }
                 
                 // Добавляем только незакрепленные
                 if (!isPinned) {
                     notices.push({
                         id: id,
-                        title: title,
-                        href: href
+                        title: title.substring(0, 50)
                     });
                 }
-            });
+            }
             
-            // Возвращаем результат
             return {
                 success: notices.length > 0,
                 count: notices.length,
-                totalLinks: links.length,
-                notices: notices,
-                strategy: strategy
+                ids: notices.map(n => n.id),
+                strategy: strategy,
+                totalLinks: allLinks,
+                samples: notices.slice(0, 3)
             };
         """)
         
         parse_time = time.time() - start_time
         
-        # Проверяем результат
-        if not result['success'] or result['count'] == 0:
+        # === ОБРАБОТКА РЕЗУЛЬТАТА ===
+        if not result['success']:
             logging.error(f"❌ Новости не найдены!")
-            logging.error(f"   Strategy: {result.get('strategy', 'unknown')}")
-            logging.error(f"   Total links found: {result.get('totalLinks', 0)}")
+            logging.error(f"   Strategy: {result['strategy']}")
+            logging.error(f"   Total links found: {result['totalLinks']}")
             logging.error("💡 Запускаем диагностику...")
-            
-            # Автоматически запускаем диагностику
             debug_save_html_and_find_selectors(driver)
             return []
         
-        # Извлекаем только ID
-        notice_ids = [n['id'] for n in result['notices']]
-        
-        # Детальное логирование (показываем стратегию и количество ссылок)
+        # Успех!
         logging.info(f"✅ Найдено {result['count']} новостей (strategy: {result['strategy']}, total links: {result['totalLinks']})")
-        logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
+        logging.info(f"🔢 ID: {result['ids'][:5]}{'...' if len(result['ids']) > 5 else ''}")
+        
+        # Примеры новостей
+        if result.get('samples'):
+            logging.info("📋 Примеры:")
+            for sample in result['samples']:
+                logging.info(f"   • ID:{sample['id']} - {sample['title']}")
+        
         logging.info(f"⏱️ Время парсинга: {parse_time:.3f}s")
         
         # Оценка скорости
@@ -492,11 +499,13 @@ def get_all_notice_ids(driver):
         else:
             logging.info(f"⚡ Отлично: {parse_time:.3f}s < 0.5s!")
         
-        return notice_ids
+        return result['ids']
         
     except Exception as e:
         parse_time = time.time() - start_time
         logging.error(f"❌ Ошибка парсинга (время: {parse_time:.3f}s): {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         logging.error("💡 Запускаем диагностику...")
         
         # Автоматически запускаем диагностику при ошибке
@@ -1221,6 +1230,17 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
     
     if notice_ids:
         logging.info(f"✅ HTML MODE: Получено {len(notice_ids)} ID за {total_time:.3f}s")
+        logging.info(f"⏱️ ━━━ ИТОГО ЦИКЛ: {total_time:.3f}s ━━━")
+        logging.info(f"   Strategy: HTML")
+        
+        if total_time < 1.5:
+            logging.info("  ✅ ОТЛИЧНО: < 1.5 сек")
+        elif total_time < 2.0:
+            logging.info("  ✅ ПРИЕМЛЕМО: < 2 сек")
+        else:
+            logging.warning(f"  ⚠️ МЕДЛЕННО: Полный цикл {total_time:.3f} сек")
+        
+        logging.info(f"     ⏱️ Load {page_load_time:.3f}s | Wait {wait_time:.3f}s | Parse {parse_time:.3f}s")
     
     return notice_ids, "HTML", {"total": total_time, "html": html_details}
 
