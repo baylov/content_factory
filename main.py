@@ -4,6 +4,7 @@ import logging
 from datetime import datetime
 import re
 import random
+import json
 from logging.handlers import RotatingFileHandler
 
 import requests
@@ -122,10 +123,13 @@ UPBIT_NOTICE_URL = "https://upbit.com/service_center/notice"
 LAST_NOTICE_FILE = "last_notice.txt"
 
 
-def init_driver():
+def init_driver(enable_cdp=False):
     """
     Инициализирует Selenium WebDriver с агрессивными настройками для максимальной скорости.
     Цель: загрузка страницы за 0.3-0.5 секунды вместо 2+ секунд.
+    
+    Args:
+        enable_cdp: Если True, включает Chrome DevTools Protocol для перехвата сетевых запросов
     """
     try:
         chrome_options = Options()
@@ -153,8 +157,15 @@ def init_driver():
         chrome_options.add_argument('--mute-audio')
         chrome_options.add_argument('--disable-breakpad')
         chrome_options.add_argument('--disable-crash-reporter')
-        chrome_options.add_argument('--disable-logging')
-        chrome_options.add_argument('--log-level=3')
+        
+        # CDP logging - включаем только если необходимо
+        if enable_cdp:
+            chrome_options.add_argument('--enable-logging')
+            chrome_options.add_argument('--v=1')
+            chrome_options.set_capability('goog:loggingPrefs', {'performance': 'ALL'})
+        else:
+            chrome_options.add_argument('--disable-logging')
+            chrome_options.add_argument('--log-level=3')
         
         # Блокировка всех медиа и ненужных ресурсов через prefs
         prefs = {
@@ -196,8 +207,19 @@ def init_driver():
         
         # Убираем implicit wait - будем использовать explicit wait только для списка новостей
         driver.implicitly_wait(0)
-
-        logging.info("✅ Selenium WebDriver с STEALTH режимом инициализирован")
+        
+        # Включаем CDP Network tracking если требуется
+        if enable_cdp:
+            try:
+                driver.execute_cdp_cmd('Network.enable', {})
+                logging.info("✅ Selenium WebDriver с STEALTH + CDP режимом инициализирован")
+                logging.info("  ✓ Chrome DevTools Protocol enabled для перехвата API")
+            except Exception as cdp_error:
+                logging.warning(f"⚠️ CDP не удалось активировать: {cdp_error}")
+                logging.info("  → Fallback на HTML парсинг")
+        else:
+            logging.info("✅ Selenium WebDriver с STEALTH режимом инициализирован")
+        
         logging.info("  ✓ Скрыты признаки автоматизации")
         logging.info("  ✓ Реалистичный User-Agent")
         logging.info("  ✓ WebGL/Canvas fingerprint защита")
@@ -495,6 +517,333 @@ def get_notice_by_id(driver, notice_id):
         }
     except Exception as e:
         logging.error(f"[get_notice_by_id] Ошибка для ID {notice_id}: {e}")
+        return None
+
+
+def discover_api_endpoints(driver, save_to_file=True):
+    """
+    Режим обнаружения API endpoints - анализирует сетевые запросы
+    и находит JSON API которые использует Upbit для загрузки новостей
+    
+    Args:
+        driver: Selenium WebDriver с включенным CDP
+        save_to_file: Сохранять ли результаты в api_discovery.json
+    
+    Returns:
+        list: Список найденных API endpoints
+    """
+    logging.info("🔍 ━━━ РЕЖИМ ОБНАРУЖЕНИЯ API ━━━")
+    logging.info("Загружаем страницу и анализируем сетевые запросы...")
+    
+    try:
+        # Загружаем страницу
+        driver.get(UPBIT_NOTICE_URL)
+        time.sleep(3)  # Даём всем запросам завершиться
+        
+        # Получаем все логи производительности
+        logs = driver.get_log('performance')
+        logging.info(f"📊 Всего сетевых событий: {len(logs)}")
+        
+        # Анализируем запросы
+        api_candidates = []
+        json_responses = []
+        
+        for log in logs:
+            try:
+                message = json.loads(log['message'])
+                msg_data = message.get('message', {})
+                method = msg_data.get('method', '')
+                
+                # Ищем ответы на запросы
+                if method == 'Network.responseReceived':
+                    params = msg_data.get('params', {})
+                    response = params.get('response', {})
+                    url = response.get('url', '')
+                    mime_type = response.get('mimeType', '')
+                    status = response.get('status', 0)
+                    
+                    # Фильтруем JSON ответы
+                    if 'json' in mime_type.lower() or 'application' in mime_type.lower():
+                        json_responses.append({
+                            'url': url,
+                            'status': status,
+                            'mimeType': mime_type,
+                            'requestId': params.get('requestId', '')
+                        })
+                        
+                        # Проверяем на наличие ключевых слов
+                        url_lower = url.lower()
+                        if any(keyword in url_lower for keyword in ['notice', 'announcement', 'news', 'board', 'list']):
+                            api_candidates.append({
+                                'url': url,
+                                'status': status,
+                                'mimeType': mime_type,
+                                'requestId': params.get('requestId', ''),
+                                'priority': 'HIGH'
+                            })
+                            logging.info(f"🎯 Найден потенциальный API: {url}")
+            
+            except (json.JSONDecodeError, KeyError) as e:
+                # Пропускаем невалидные логи
+                continue
+        
+        logging.info(f"\n📋 JSON ответы найдены: {len(json_responses)}")
+        
+        if api_candidates:
+            logging.info(f"\n🎯 Потенциальные API endpoints: {len(api_candidates)}")
+            for idx, candidate in enumerate(api_candidates, 1):
+                logging.info(f"  {idx}. {candidate['url']}")
+                logging.info(f"     Status: {candidate['status']}, Type: {candidate['mimeType']}")
+        else:
+            logging.warning("\n⚠️ Прямые API endpoints с ключевыми словами не найдены")
+            logging.info("📋 Все JSON ответы:")
+            for idx, resp in enumerate(json_responses[:10], 1):  # Показываем первые 10
+                logging.info(f"  {idx}. {resp['url']}")
+                logging.info(f"     Status: {resp['status']}, Type: {resp['mimeType']}")
+        
+        # Сохраняем результаты
+        if save_to_file:
+            discovery_data = {
+                'timestamp': datetime.now().isoformat(),
+                'total_network_events': len(logs),
+                'json_responses': json_responses,
+                'api_candidates': api_candidates
+            }
+            
+            with open('api_discovery.json', 'w', encoding='utf-8') as f:
+                json.dump(discovery_data, f, indent=2, ensure_ascii=False)
+            
+            logging.info("\n💾 Результаты сохранены в api_discovery.json")
+        
+        return api_candidates if api_candidates else json_responses
+    
+    except Exception as e:
+        logging.error(f"❌ Ошибка обнаружения API: {e}")
+        return []
+
+
+def extract_ids_from_json(data):
+    """
+    Извлекает ID новостей из JSON ответа API
+    Поддерживает различные структуры данных
+    
+    Args:
+        data: JSON данные (dict или list)
+    
+    Returns:
+        list: Список ID новостей (незакрепленных)
+    """
+    notice_ids = []
+    
+    try:
+        # Вариант 1: data.data.list[] (наиболее вероятный для Upbit)
+        if isinstance(data, dict) and 'data' in data:
+            if isinstance(data['data'], dict) and 'list' in data['data']:
+                items = data['data']['list']
+                for item in items:
+                    # Проверяем закреплённость
+                    is_pinned = item.get('fixed', False) or item.get('pinned', False) or item.get('is_pinned', False)
+                    if not is_pinned:
+                        notice_id = item.get('id') or item.get('notice_id') or item.get('noticeId')
+                        if notice_id:
+                            notice_ids.append(int(notice_id))
+                
+                if notice_ids:
+                    logging.info(f"✅ Структура: data.data.list[] - найдено {len(notice_ids)} ID")
+                    return notice_ids
+        
+        # Вариант 2: data.notices[]
+        if isinstance(data, dict) and 'notices' in data:
+            items = data['notices']
+            for item in items:
+                is_pinned = item.get('fixed', False) or item.get('pinned', False)
+                if not is_pinned:
+                    notice_id = item.get('id') or item.get('notice_id')
+                    if notice_id:
+                        notice_ids.append(int(notice_id))
+            
+            if notice_ids:
+                logging.info(f"✅ Структура: data.notices[] - найдено {len(notice_ids)} ID")
+                return notice_ids
+        
+        # Вариант 3: data.data[] (прямой массив)
+        if isinstance(data, dict) and 'data' in data and isinstance(data['data'], list):
+            for item in data['data']:
+                is_pinned = item.get('fixed', False) or item.get('pinned', False)
+                if not is_pinned:
+                    notice_id = item.get('id') or item.get('notice_id')
+                    if notice_id:
+                        notice_ids.append(int(notice_id))
+            
+            if notice_ids:
+                logging.info(f"✅ Структура: data.data[] - найдено {len(notice_ids)} ID")
+                return notice_ids
+        
+        # Вариант 4: data.list[]
+        if isinstance(data, dict) and 'list' in data:
+            for item in data['list']:
+                is_pinned = item.get('fixed', False) or item.get('pinned', False)
+                if not is_pinned:
+                    notice_id = item.get('id') or item.get('notice_id')
+                    if notice_id:
+                        notice_ids.append(int(notice_id))
+            
+            if notice_ids:
+                logging.info(f"✅ Структура: data.list[] - найдено {len(notice_ids)} ID")
+                return notice_ids
+        
+        # Вариант 5: Прямой массив
+        if isinstance(data, list):
+            for item in data:
+                is_pinned = item.get('fixed', False) or item.get('pinned', False)
+                if not is_pinned:
+                    notice_id = item.get('id') or item.get('notice_id')
+                    if notice_id:
+                        notice_ids.append(int(notice_id))
+            
+            if notice_ids:
+                logging.info(f"✅ Структура: прямой массив - найдено {len(notice_ids)} ID")
+                return notice_ids
+        
+        # Если ничего не нашли - показываем структуру для отладки
+        logging.warning(f"⚠️ Неизвестная структура JSON")
+        if isinstance(data, dict):
+            logging.warning(f"   Доступные ключи: {list(data.keys())}")
+            # Показываем первый уровень вложенности
+            for key, value in list(data.items())[:3]:
+                if isinstance(value, dict):
+                    logging.warning(f"   {key}: dict с ключами {list(value.keys())[:5]}")
+                elif isinstance(value, list):
+                    logging.warning(f"   {key}: list длины {len(value)}")
+                else:
+                    logging.warning(f"   {key}: {type(value).__name__}")
+        
+    except Exception as e:
+        logging.error(f"❌ Ошибка извлечения ID из JSON: {e}")
+    
+    return notice_ids
+
+
+def get_notices_from_api(driver, known_endpoints=None, max_wait=2.0):
+    """
+    Получает новости через перехват API запросов используя CDP
+    
+    Args:
+        driver: Selenium WebDriver с включенным CDP
+        known_endpoints: Список известных API endpoints (опционально)
+        max_wait: Максимальное время ожидания API запроса (сек)
+    
+    Returns:
+        list: Список ID новостей или пустой список при ошибке
+    """
+    start_time = time.time()
+    
+    try:
+        # Загружаем страницу
+        page_load_start = time.time()
+        driver.get(UPBIT_NOTICE_URL)
+        page_load_time = time.time() - page_load_start
+        
+        logging.info(f"  ⏱️ Загрузка страницы: {page_load_time:.3f}s")
+        
+        # Ждём появления API запросов
+        wait_start = time.time()
+        notices_data = None
+        api_url_found = None
+        
+        while time.time() - wait_start < max_wait:
+            try:
+                logs = driver.get_log('performance')
+                
+                for log in logs:
+                    try:
+                        message = json.loads(log['message'])
+                        msg_data = message.get('message', {})
+                        method = msg_data.get('method', '')
+                        
+                        if method == 'Network.responseReceived':
+                            params = msg_data.get('params', {})
+                            response = params.get('response', {})
+                            url = response.get('url', '')
+                            mime_type = response.get('mimeType', '')
+                            request_id = params.get('requestId', '')
+                            
+                            # Проверяем, это ли наш API endpoint
+                            url_lower = url.lower()
+                            is_json = 'json' in mime_type.lower() or 'application' in mime_type.lower()
+                            is_notice_api = any(keyword in url_lower for keyword in ['notice', 'announcement', 'board', 'list'])
+                            
+                            # Если есть известные endpoints - проверяем их
+                            if known_endpoints:
+                                is_notice_api = is_notice_api or any(endpoint in url for endpoint in known_endpoints)
+                            
+                            if is_json and is_notice_api:
+                                # Нашли API запрос! Получаем тело ответа
+                                try:
+                                    body_response = driver.execute_cdp_cmd('Network.getResponseBody', {'requestId': request_id})
+                                    body_text = body_response.get('body', '')
+                                    
+                                    if body_text:
+                                        # Парсим JSON
+                                        notices_data = json.loads(body_text)
+                                        api_url_found = url
+                                        logging.info(f"✅ API запрос перехвачен: {url[:80]}...")
+                                        break
+                                
+                                except Exception as body_error:
+                                    # Тело ответа может быть недоступно - пропускаем
+                                    continue
+                    
+                    except (json.JSONDecodeError, KeyError):
+                        continue
+                
+                if notices_data:
+                    break
+                
+                time.sleep(0.05)  # Проверяем каждые 50ms
+            
+            except Exception as poll_error:
+                logging.debug(f"Ошибка при опросе логов: {poll_error}")
+                time.sleep(0.05)
+        
+        wait_time = time.time() - wait_start
+        
+        if notices_data:
+            # Парсим JSON и извлекаем ID
+            parse_start = time.time()
+            notice_ids = extract_ids_from_json(notices_data)
+            parse_time = time.time() - parse_start
+            
+            total_time = time.time() - start_time
+            
+            if notice_ids:
+                logging.info(f"⚡ API PARSING SUCCESS!")
+                logging.info(f"  📡 Endpoint: {api_url_found[:80]}...")
+                logging.info(f"  🔢 Найдено ID: {len(notice_ids)} → {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
+                logging.info(f"  ⏱️ Время: Load {page_load_time:.3f}s + Wait {wait_time:.3f}s + Parse {parse_time:.3f}s = {total_time:.3f}s")
+                
+                if total_time < 1.0:
+                    logging.info("  ✅ ⚡ ОТЛИЧНО: < 1 секунды!")
+                elif total_time < 1.5:
+                    logging.info("  ✅ ХОРОШО: < 1.5 секунд")
+                else:
+                    logging.info("  ⚠️ ПРИЕМЛЕМО: < 2 секунд")
+                
+                return notice_ids
+            else:
+                logging.warning(f"⚠️ API перехвачен, но ID не извлечены (неизвестная структура)")
+                logging.warning(f"   → Fallback на HTML парсинг")
+                return None
+        else:
+            elapsed = time.time() - start_time
+            logging.warning(f"⚠️ API endpoint не найден за {elapsed:.3f}s")
+            logging.warning(f"   → Fallback на HTML парсинг")
+            return None
+    
+    except Exception as e:
+        elapsed = time.time() - start_time
+        logging.error(f"❌ Ошибка перехвата API ({elapsed:.3f}s): {e}")
+        logging.warning(f"   → Fallback на HTML парсинг")
         return None
 
 
