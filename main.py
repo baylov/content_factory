@@ -1167,23 +1167,14 @@ def main():
     logging.info("🚀 Upbit Notice Bot запущен")
     logging.info("")
     
-    # Проверяем наличие api_discovery.json и загружаем endpoints
-    known_endpoints = load_known_endpoints()
-    use_cdp = True  # По умолчанию используем CDP API
+    # CDP API отключён - используем только HTML парсинг
+    known_endpoints = []
+    use_cdp = False  # CDP API временно отключён
     
-    if known_endpoints:
-        logging.info("📡 Режим: CDP API ПЕРЕХВАТ")
-        logging.info("  ✓ Network tracking enabled")
-        logging.info(f"  ✓ Известных API endpoints: {len(known_endpoints)}")
-        logging.info("  ✓ HTML fallback активен")
-        logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1 секунда")
-    else:
-        logging.info("📡 Режим: CDP API DISCOVERY")
-        logging.info("  ✓ Network tracking enabled")
-        logging.info("  ⚠️ Известных API endpoints: 0 (запускаем discovery)")
-        logging.info("  ✓ HTML fallback активен")
-        logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1-2 секунды")
-    
+    logging.info("📡 Режим: ОПТИМИЗИРОВАННЫЙ HTML ПАРСИНГ")
+    logging.info("  ✓ CDP API отключён (временно)")
+    logging.info("  ✓ Прямой HTML парсинг")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 1.5-2 секунды")
     logging.info("")
     logging.info("🔄 Интервал проверки: 1-2 секунды")
     logging.info("")
@@ -1192,17 +1183,19 @@ def main():
     logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
     logging.info("  ✓ Умное ожидание (polling 50ms)")
-    logging.info("  ✓ API перехват (приоритет) → HTML парсинг (fallback)")
+    logging.info("  ✓ Быстрый HTML парсинг")
     logging.info("  ✓ Автодиагностика при ошибках")
     logging.info("  ✓ Детальные метрики на каждом этапе")
     logging.info("")
     
-    # Инициализация драйвера с CDP если нужно
+    # Инициализация драйвера без CDP (только HTML парсинг)
     driver = init_driver(enable_cdp=use_cdp)
     if not driver:
         logging.error("❌ Не удалось запустить браузер")
         return
     
+    # CDP discovery отключён (use_cdp=False)
+    # Код оставлен для будущего использования
     if use_cdp and not known_endpoints:
         logging.info("🔍 Запускаем автоматическое обнаружение API endpoints...")
         try:
@@ -1225,7 +1218,7 @@ def main():
         
         cycle_start = time.time()
         
-        # Используем API-first подход
+        # Используем HTML парсинг (CDP отключён)
         all_ids, method, timings = get_all_notice_ids_with_api(driver, known_endpoints=known_endpoints, use_cdp=use_cdp)
         
         # Итоговое время всего цикла
@@ -1234,22 +1227,27 @@ def main():
         logging.info(f"⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
         logging.info(f"   Strategy: {method}")
         
-        # Оценка общей производительности
-        if method == "API" and total_cycle_time < 1.0:
-            logging.info("✅ ⚡ ОТЛИЧНО: API MODE - Полный цикл < 1 сек!")
-        elif method == "API" and total_cycle_time < 1.5:
-            logging.info("✅ ХОРОШО: API MODE - Полный цикл < 1.5 сек")
-        elif method == "HTML" and total_cycle_time < 2.0:
-            logging.info("✅ ПРИЕМЛЕМО: HTML FALLBACK - Полный цикл < 2 сек")
+        # Оценка общей производительности (HTML режим)
+        if total_cycle_time < 1.0:
+            logging.info("✅ ⚡ ОТЛИЧНО: Полный цикл < 1 сек!")
+        elif total_cycle_time < 1.5:
+            logging.info("✅ ХОРОШО: Полный цикл < 1.5 сек")
+        elif total_cycle_time < 2.0:
+            logging.info("✅ ПРИЕМЛЕМО: Полный цикл < 2 сек")
         else:
-            logging.error(f"❌ МЕДЛЕННО: {method} MODE - Полный цикл {total_cycle_time:.3f} сек")
+            logging.warning(f"⚠️ МЕДЛЕННО: Полный цикл {total_cycle_time:.3f} сек")
         
-        if method == "API":
-            api_info = timings.get("api", {}) if isinstance(timings, dict) else {}
-            endpoint = api_info.get("endpoint")
-            if endpoint and endpoint not in known_endpoints:
-                known_endpoints.append(endpoint)
-                logging.info(f"   📡 Endpoint сохранен: {endpoint[:100]}")
+        # Показываем детальные метрики HTML парсинга
+        if method == "HTML" and isinstance(timings, dict):
+            html_info = timings.get("html", {})
+            if html_info:
+                logging.info(
+                    "     ⏱️ Load {0:.3f}s | Wait {1:.3f}s | Parse {2:.3f}s".format(
+                        html_info.get("page_load", 0.0),
+                        html_info.get("wait", 0.0),
+                        html_info.get("parse", 0.0)
+                    )
+                )
         
         if not all_ids:
             logging.error("❌ Не удалось получить ID новостей")
@@ -1377,22 +1375,8 @@ def main():
                     logging.info(f"  ⏱️ ━━━ ИТОГО ЦИКЛ: {total_cycle_time:.3f}s ━━━")
                     logging.info(f"     Strategy: {method}")
                     
-                    if method == "API":
-                        logging.info(f"  ⚡ API MODE: Получено за {total_cycle_time:.3f}s")
-                        api_info = timings.get("api", {}) if isinstance(timings, dict) else {}
-                        logging.info(
-                            "     ⏱️ Load {0:.3f}s | API {1:.3f}s | Parse {2:.3f}s".format(
-                                api_info.get("page_load_time", 0.0),
-                                api_info.get("wait_time", 0.0),
-                                api_info.get("parse_time", 0.0)
-                            )
-                        )
-                        endpoint = api_info.get("endpoint")
-                        if endpoint and endpoint not in known_endpoints:
-                            known_endpoints.append(endpoint)
-                            logging.info(f"     📡 Endpoint сохранен: {endpoint[:100]}")
-                    elif method == "HTML":
-                        logging.warning(f"  ⚠️ HTML FALLBACK: Получено за {total_cycle_time:.3f}s")
+                    # HTML режим - показываем детальные метрики
+                    if method == "HTML":
                         html_info = timings.get("html", {}) if isinstance(timings, dict) else {}
                         logging.info(
                             "     ⏱️ Load {0:.3f}s | Wait {1:.3f}s | Parse {2:.3f}s".format(
@@ -1401,6 +1385,15 @@ def main():
                                 html_info.get("parse", 0.0)
                             )
                         )
+                        # Оценка производительности
+                        if total_cycle_time < 1.0:
+                            logging.info("  ⚡ ОТЛИЧНО: < 1 сек!")
+                        elif total_cycle_time < 1.5:
+                            logging.info("  ✅ ХОРОШО: < 1.5 сек")
+                        elif total_cycle_time < 2.0:
+                            logging.info("  ✅ ПРИЕМЛЕМО: < 2 сек")
+                        else:
+                            logging.warning(f"  ⚠️ МЕДЛЕННО: {total_cycle_time:.3f} сек")
                     else:
                         logging.error(f"  ❌ {method} MODE: Получено за {total_cycle_time:.3f}s")
                     
