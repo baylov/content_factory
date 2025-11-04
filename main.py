@@ -509,7 +509,7 @@ def main():
         
         # Ждем только список новостей (explicit wait)
         wait_start = time.time()
-        wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
+        wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
         wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
         wait_time = time.time() - wait_start
         
@@ -528,8 +528,8 @@ def main():
         else:
             logging.error(f"❌ МЕДЛЕННО: Загрузка {total_load_time:.3f} сек")
         
-        # Даём JS время на загрузку новостей
-        time.sleep(1)
+        # Убрано для скорости - новости загружаются мгновенно
+        # time.sleep(1)
         
         # Получаем все ID со страницы
         all_ids = get_all_notice_ids(driver)
@@ -658,21 +658,18 @@ def main():
                     
                     # Ждем загрузки только списка новостей (explicit wait)
                     wait_start = time.time()
-                    wait = WebDriverWait(driver, 3)  # Уменьшили с 10 до 3 секунд
+                    wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
                     wait_time = time.time() - wait_start
                     
-                    # Даём JS время на загрузку новостей
-                    stability_wait_start = time.time()
-                    time.sleep(1)
-                    stability_wait_time = time.time() - stability_wait_start
+                    # Убрано для скорости - новости загружаются мгновенно
+                    # time.sleep(1)
                     
                     total_refresh_time = time.time() - refresh_load_start
                     
                     # Детальное логирование времени каждого этапа
                     logging.info(f"  ⏱️ Refresh страницы: {refresh_load_time:.3f}s")
                     logging.info(f"  ⏱️ Ожидание списка: {wait_time:.3f}s")
-                    logging.info(f"  ⏱️ Стабилизация: {stability_wait_time:.3f}s")
                     logging.info(f"  ⏱️ ИТОГО refresh: {total_refresh_time:.3f}s")
                     
                     if total_refresh_time < 0.5:
@@ -774,9 +771,10 @@ def main():
                     
                     # Перезагружаем страницу с оптимизированными настройками
                     driver.get(UPBIT_NOTICE_URL)
-                    wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
+                    wait = WebDriverWait(driver, 0.5)  # Оптимизировано: 0.5 сек достаточно
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    time.sleep(1)
+                    # Убрано для скорости - новости загружаются мгновенно
+                    # time.sleep(1)
                     
                     # Получаем актуальный max_id
                     reloaded_ids = get_all_notice_ids(driver)
