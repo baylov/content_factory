@@ -17,6 +17,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
+from selenium_stealth import stealth
 
 load_dotenv()
 
@@ -128,7 +129,7 @@ def init_driver():
     """
     try:
         chrome_options = Options()
-        chrome_options.add_argument('--headless')
+        chrome_options.add_argument('--headless=new')  # Новый headless режим
         chrome_options.add_argument('--no-sandbox')
         chrome_options.add_argument('--disable-dev-shm-usage')
         chrome_options.add_argument('--disable-gpu')
@@ -173,20 +174,33 @@ def init_driver():
         # 'eager' не ждет загрузки всех ресурсов, только DOM
         chrome_options.page_load_strategy = 'eager'
         
-        # Отключаем логи Chrome
-        chrome_options.add_experimental_option('excludeSwitches', ['enable-logging'])
+        # Отключить обнаружение автоматизации
+        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        chrome_options.add_experimental_option('useAutomationExtension', False)
 
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=chrome_options)
 
-        # Уменьшаем timeout до 3 секунд (максимум)
-        driver.set_page_load_timeout(3)
+        # Применяем STEALTH для обхода детекции автоматизации
+        stealth(driver,
+            languages=["ko-KR", "ko", "en-US", "en"],
+            vendor="Google Inc.",
+            platform="Win32",
+            webgl_vendor="Intel Inc.",
+            renderer="Intel Iris OpenGL Engine",
+            fix_hairline=True,
+        )
+
+        # Увеличиваем timeout до 10 секунд для обхода блокировки
+        driver.set_page_load_timeout(10)
         
         # Убираем implicit wait - будем использовать explicit wait только для списка новостей
         driver.implicitly_wait(0)
 
-        logging.info("✅ Браузер Chrome запущен в ULTRA-FAST режиме (page_load_strategy=eager)")
-        logging.info("🚀 Целевая скорость загрузки: 0.3-0.5 секунды")
+        logging.info("✅ Selenium WebDriver с STEALTH режимом инициализирован")
+        logging.info("  ✓ Скрыты признаки автоматизации")
+        logging.info("  ✓ Реалистичный User-Agent")
+        logging.info("  ✓ WebGL/Canvas fingerprint защита")
         return driver
 
     except Exception as e:
@@ -514,8 +528,8 @@ def main():
         else:
             logging.error(f"❌ МЕДЛЕННО: Загрузка {total_load_time:.3f} сек")
         
-        # Небольшая пауза для стабильности JS
-        time.sleep(0.2)
+        # Даём JS время на загрузку новостей
+        time.sleep(1)
         
         # Получаем все ID со страницы
         all_ids = get_all_notice_ids(driver)
@@ -648,9 +662,9 @@ def main():
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
                     wait_time = time.time() - wait_start
                     
-                    # Небольшая пауза для стабильности JS
+                    # Даём JS время на загрузку новостей
                     stability_wait_start = time.time()
-                    time.sleep(0.1)  # Уменьшили с 0.3 до 0.1
+                    time.sleep(1)
                     stability_wait_time = time.time() - stability_wait_start
                     
                     total_refresh_time = time.time() - refresh_load_start
@@ -762,7 +776,7 @@ def main():
                     driver.get(UPBIT_NOTICE_URL)
                     wait = WebDriverWait(driver, 5)  # Уменьшили с 15 до 5 секунд
                     wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'tr a[href*="/service_center/notice"]')))
-                    time.sleep(0.2)  # Уменьшили задержку
+                    time.sleep(1)
                     
                     # Получаем актуальный max_id
                     reloaded_ids = get_all_notice_ids(driver)
