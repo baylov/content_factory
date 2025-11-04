@@ -5,6 +5,7 @@ Simple test to verify Playwright setup works correctly
 
 import asyncio
 import sys
+import re
 from main import UpbitParser
 from bs4 import BeautifulSoup
 
@@ -36,6 +37,50 @@ async def test_playwright():
             links = soup.select('tr a[href*="/service_center/notice"]')
             print(f"✓ Found {len(links)} news links")
             
+            if len(links) == 0:
+                print("\n4. Analyzing page structure...")
+                
+                # Ищем все ссылки на странице
+                all_links = soup.find_all('a', href=True)
+                print(f"   Total links on page: {len(all_links)}")
+                
+                # Показываем первые 10 ссылок
+                print("\n   First 10 links:")
+                for i, link in enumerate(all_links[:10], 1):
+                    href = link['href']
+                    text = link.get_text(strip=True)[:40]
+                    print(f"   {i}. {text} -> {href}")
+                
+                # Ищем упоминания "notice" или "공지"
+                notice_related = [l for l in all_links if 'notice' in l['href'].lower() or '공지' in l.get_text()]
+                print(f"\n   Links with 'notice' or '공지': {len(notice_related)}")
+                
+                if notice_related:
+                    print("\n   First 5 notice-related links:")
+                    for i, link in enumerate(notice_related[:5], 1):
+                        href = link['href']
+                        text = link.get_text(strip=True)[:40]
+                        print(f"   {i}. {text} -> {href}")
+                
+                # Показываем структуру таблицы
+                tables = soup.find_all('table')
+                print(f"\n   Tables found: {len(tables)}")
+                
+                divs_with_list = soup.find_all('div', class_=re.compile('list|notice|board', re.I))
+                print(f"   Divs with list/notice/board class: {len(divs_with_list)}")
+                
+                if divs_with_list:
+                    print("\n   First 3 divs with list/notice/board class:")
+                    for i, div in enumerate(divs_with_list[:3], 1):
+                        class_attr = div.get('class', [])
+                        data_attrs = {k: v for k, v in div.attrs.items() if k.startswith('data-')}
+                        links_in_div = div.find_all('a', href=True)
+                        print(f"   {i}. Classes: {class_attr}, data-attrs: {data_attrs}, links inside: {len(links_in_div)}")
+                
+                print("\n❌ TEST FAILED - No news links found with current selector")
+                print("HTML saved to upbit_page_debug.html for manual analysis")
+                return False
+            
             if len(links) > 0:
                 print("\n4. Sample news links:")
                 for i, link in enumerate(links[:3], 1):
@@ -47,9 +92,6 @@ async def test_playwright():
                 print("✅ TEST PASSED - Playwright setup working correctly!")
                 print("=" * 60)
                 return True
-            else:
-                print("\n❌ TEST FAILED - No news links found")
-                return False
         else:
             print("❌ TEST FAILED - Could not load page")
             return False
