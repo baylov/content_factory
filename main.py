@@ -4,11 +4,13 @@ import logging
 from datetime import datetime
 import re
 import random
+import asyncio
 from logging.handlers import RotatingFileHandler
 
 import requests
 from bs4 import BeautifulSoup
 from dotenv import load_dotenv
+from playwright.async_api import async_playwright
 
 load_dotenv()
 
@@ -113,29 +115,125 @@ UPBIT_NOTICE_URL = "https://upbit.com/service_center/notice"
 LAST_NOTICE_FILE = "last_notice.txt"
 
 
-def init_session():
-    """
-    Инициализирует requests Session с оптимальными настройками для максимальной скорости.
-    Цель: HTTP запрос за 0.2-0.4 секунды.
-    """
-    session = requests.Session()
-    
-    # Настраиваем заголовки для имитации браузера
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9,ko;q=0.8',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Cache-Control': 'max-age=0'
-    })
-    
-    logging.info("✅ Requests Session инициализирована")
-    logging.info("🚀 Используем requests + BeautifulSoup для ULTRA-FAST парсинга")
-    logging.info("⚡ Целевая скорость HTTP запроса: 0.2-0.4 секунды")
-    
-    return session
+class UpbitParser:
+    def __init__(self):
+        self.playwright = None
+        self.browser = None
+        self.context = None
+        self.page = None
+        
+    async def init(self):
+        """Инициализация браузера один раз при старте"""
+        logging.info("🔧 Инициализация Playwright браузера...")
+        
+        self.playwright = await async_playwright().start()
+        
+        # Запуск браузера с оптимизациями
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=[
+                '--disable-gpu',
+                '--disable-dev-shm-usage',
+                '--disable-setuid-sandbox',
+                '--no-sandbox',
+                '--disable-blink-features=AutomationControlled'
+            ]
+        )
+        
+        # Создание контекста с более реалистичным user agent
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            locale='ko-KR',
+            timezone_id='Asia/Seoul',
+            extra_http_headers={
+                'Accept-Language': 'ko-KR,ko;q=0.9,en-US;q=0.8,en;q=0.7',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            }
+        )
+        
+        # Создание страницы
+        self.page = await self.context.new_page()
+        
+        # Скрываем признаки автоматизации
+        await self.page.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {
+                get: () => undefined
+            });
+            window.navigator.chrome = {
+                runtime: {}
+            };
+            Object.defineProperty(navigator, 'plugins', {
+                get: () => [1, 2, 3, 4, 5]
+            });
+            Object.defineProperty(navigator, 'languages', {
+                get: () => ['ko-KR', 'ko', 'en-US', 'en']
+            });
+        """)
+        
+        # Блокировка ненужных ресурсов для скорости (только images, media)
+        # Оставляем CSS и fonts чтобы страница загружалась корректно
+        await self.page.route("**/*", lambda route: route.abort() 
+            if route.request.resource_type in ["image", "media"]
+            else route.continue_())
+        
+        # Увеличенные таймауты для первой загрузки
+        self.page.set_default_timeout(10000)
+        self.page.set_default_navigation_timeout(10000)
+        
+        logging.info("✅ Playwright браузер инициализирован")
+        logging.info("  ✓ Headless режим: включен")
+        logging.info("  ✓ Блокировка ресурсов: images, media (CSS/fonts разрешены)")
+        logging.info("  ✓ Таймауты: 10 секунд")
+        logging.info("  ✓ Локаль: ko-KR (Asia/Seoul)")
+        
+    async def get_page_html(self):
+        """Получение HTML страницы через Playwright с замером времени"""
+        start_time = time.time()
+        
+        try:
+            # Переход на страницу (используем ту же page, не создаём новую!)
+            await self.page.goto(UPBIT_NOTICE_URL, wait_until='networkidle')
+            
+            # Дополнительное ожидание для полной загрузки JS-контента
+            await self.page.wait_for_timeout(1000)
+            
+            load_time = time.time() - start_time
+            logging.info(f"⏱️ Время загрузки страницы: {load_time:.3f}s")
+            
+            # Проверка на ошибки на странице
+            error_text = await self.page.evaluate('''() => {
+                return document.body.innerText;
+            }''')
+            
+            if '알 수 없는 오류' in error_text or '오류가 발생' in error_text:
+                logging.error("❌ Страница показывает ошибку")
+                return None, load_time
+            
+            # Извлечение HTML
+            html = await self.page.content()
+            
+            return html, load_time
+            
+        except Exception as e:
+            load_time = time.time() - start_time
+            logging.error(f"❌ Ошибка загрузки страницы: {e}")
+            return None, load_time
+        
+    async def close(self):
+        """Корректное закрытие браузера"""
+        logging.info("🔄 Закрытие Playwright браузера...")
+        
+        if self.page:
+            await self.page.close()
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
+            
+        logging.info("✅ Браузер закрыт")
 
 
 def get_all_notice_ids(soup):
@@ -269,43 +367,6 @@ def get_notice_by_id(soup, notice_id):
         return None
 
 
-def fetch_page(session, url, timeout=2):
-    """
-    Выполняет HTTP запрос и возвращает BeautifulSoup объект.
-    
-    Args:
-        session: requests.Session объект
-        url: URL страницы
-        timeout: таймаут запроса (по умолчанию 2 секунды)
-    
-    Returns:
-        tuple: (soup, response_time, status_code) или (None, 0, status_code) при ошибке
-    """
-    try:
-        start_time = time.time()
-        response = session.get(url, timeout=timeout)
-        response_time = time.time() - start_time
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.text, 'html.parser')
-            return soup, response_time, response.status_code
-        else:
-            logging.error(f"[fetch_page] HTTP {response.status_code}: {url}")
-            return None, response_time, response.status_code
-    
-    except requests.exceptions.Timeout:
-        logging.error(f"[fetch_page] Timeout: {url}")
-        return None, timeout, None
-    
-    except requests.exceptions.ConnectionError as e:
-        logging.error(f"[fetch_page] Connection error: {e}")
-        return None, 0, None
-    
-    except Exception as e:
-        logging.error(f"[fetch_page] Ошибка: {e}")
-        return None, 0, None
-
-
 def get_last_max_id():
     """
     Читает максимальный известный ID из файла
@@ -347,7 +408,7 @@ def save_max_id(max_id):
         logging.error(f"[save_max_id] Ошибка записи: {e}")
 
 
-def notify_about_new_ids(session, soup, new_ids, *, detection_start=None, pause_between=0.5):
+def notify_about_new_ids(soup, new_ids, *, detection_start=None, pause_between=0.5):
     """
     Отправляет уведомления о новых новостях по их ID.
     Возвращает количество успешно обработанных новостей.
@@ -501,22 +562,24 @@ def get_refresh_interval():
     return random.uniform(0.5, 1.0)
 
 
-def main():
+async def main():
     logging.info("🚀 Upbit Notice Bot запущен")
-    logging.info("📡 Режим: ULTRA-FAST REQUESTS + BEAUTIFULSOUP")
+    logging.info("📡 Режим: PLAYWRIGHT + ASYNC (JavaScript support)")
     logging.info("🔄 Интервал проверки: 0.5-1.5 секунды (случайный)")
     logging.info("🔢 Логика: Отслеживание по максимальному ID")
     logging.info("")
     logging.info("⚡ ОПТИМИЗАЦИИ СКОРОСТИ:")
-    logging.info("  ✓ requests вместо Selenium (без браузера!)")
-    logging.info("  ✓ BeautifulSoup для парсинга HTML")
-    logging.info("  ✓ Keep-alive соединение (переиспользование session)")
-    logging.info("  ✓ Минимальный timeout (2 секунды)")
-    logging.info("  ✓ Без загрузки JavaScript, изображений, CSS")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 0.3-0.5 сек на цикл")
+    logging.info("  ✓ Playwright headless режим")
+    logging.info("  ✓ Переиспользование browser context")
+    logging.info("  ✓ Блокировка изображений, media")
+    logging.info("  ✓ Таймауты: 10 секунд")
+    logging.info("  ✓ wait_until='networkidle'")
+    logging.info("  ✓ Антидетект: скрыты признаки автоматизации")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: 2-5 сек на цикл (с JS-рендерингом)")
     logging.info("")
     
-    session = init_session()
+    parser = UpbitParser()
+    await parser.init()
     
     # Переменная для отслеживания 429 ошибок
     rate_limit_backoff = 0  # Дополнительная задержка при 429
@@ -527,25 +590,23 @@ def main():
         # Первая загрузка с подробным логированием времени
         logging.info("📡 Подключаемся к Upbit...")
         
-        soup, response_time, status_code = fetch_page(session, UPBIT_NOTICE_URL, timeout=2)
+        html, load_time = await parser.get_page_html()
         
-        if not soup:
+        if not html:
             logging.error("❌ Не удалось загрузить страницу при первом запросе")
-            if status_code == 429:
-                logging.error("❌ Получена 429 ошибка - слишком много запросов")
-                logging.info("💡 Рекомендация: увеличьте интервал между запросами")
+            await parser.close()
             return
         
-        logging.info(f"⏱️ Время HTTP запроса: {response_time:.3f}s")
-        
-        if response_time < 0.4:
-            logging.info("✅ ОТЛИЧНО: HTTP запрос < 0.4 сек!")
-        elif response_time < 0.7:
-            logging.info("✅ ХОРОШО: HTTP запрос < 0.7 сек")
-        elif response_time < 1.0:
-            logging.warning("⚠️ ПРИЕМЛЕМО: HTTP запрос < 1 сек")
+        if load_time < 0.5:
+            logging.info("⚡ ОТЛИЧНО: Загрузка < 0.5 сек!")
+        elif load_time < 1.0:
+            logging.info("✅ ХОРОШО: Загрузка < 1.0 сек")
+        elif load_time < 1.5:
+            logging.warning("⚠️ ПРИЕМЛЕМО: Загрузка < 1.5 сек")
         else:
-            logging.error(f"❌ МЕДЛЕННО: HTTP запрос {response_time:.3f} сек")
+            logging.error(f"❌ МЕДЛЕННО: Загрузка {load_time:.3f} сек")
+        
+        soup = BeautifulSoup(html, 'html.parser')
         
         # Парсим список новостей
         parse_start = time.time()
@@ -634,7 +695,7 @@ def main():
             logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
             
             # Отправляем уведомления для каждой новой новости
-            notify_about_new_ids(session, soup, new_ids, pause_between=0.5)
+            notify_about_new_ids(soup, new_ids, pause_between=0.5)
             
             # Обновляем max_id
             save_max_id(page_max_id)
@@ -664,7 +725,7 @@ def main():
                 total_delay = base_interval + rate_limit_backoff
                 
                 logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
-                time.sleep(total_delay)
+                await asyncio.sleep(total_delay)
                 
                 # Время начала цикла
                 cycle_start_time = datetime.now()
@@ -673,47 +734,33 @@ def main():
                 
                 logging.info(f"🔄 Проверка #{refresh_count} в {cycle_start_time.strftime('%H:%M:%S')}...")
                 
-                # === HTTP ЗАПРОС ===
-                http_start = time.time()
-                soup, response_time, status_code = fetch_page(session, UPBIT_NOTICE_URL, timeout=2)
-                http_time = time.time() - http_start
+                # === ЗАГРУЗКА СТРАНИЦЫ ===
+                load_start = time.time()
+                html, load_time = await parser.get_page_html()
                 
-                logging.info(f"  ⏱️ HTTP запрос: {http_time:.3f}s")
+                logging.info(f"  ⏱️ Загрузка страницы: {load_time:.3f}s")
                 
-                # Обработка ошибок HTTP
-                if not soup:
+                # Обработка ошибок загрузки
+                if not html:
                     consecutive_errors += 1
                     
-                    if status_code == 429:
-                        # 429 Too Many Requests - увеличиваем задержку
-                        rate_limit_backoff = random.uniform(10, 30)
-                        last_429_time = datetime.now()
-                        logging.error(f"❌ Получена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
-                        continue
+                    logging.warning(f"⚠️ Не удалось загрузить страницу (попытка #{refresh_count}), продолжаем...")
                     
-                    elif status_code == 403:
-                        # 403 Forbidden - возможна блокировка
-                        rate_limit_backoff = random.uniform(5, 15)
-                        logging.error(f"❌ Получена 403 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
-                        continue
+                    # Если слишком много последовательных ошибок - увеличиваем интервал
+                    if consecutive_errors > 5:
+                        rate_limit_backoff = random.uniform(5, 10)
+                        logging.warning(f"⚠️ Много последовательных ошибок, увеличиваем интервал на {rate_limit_backoff:.1f}с")
                     
-                    else:
-                        # Другие ошибки - просто логируем и продолжаем
-                        logging.warning(f"⚠️ Не удалось загрузить страницу (попытка #{refresh_count}), продолжаем...")
-                        
-                        # Если слишком много последовательных ошибок - увеличиваем интервал
-                        if consecutive_errors > 5:
-                            rate_limit_backoff = random.uniform(5, 10)
-                            logging.warning(f"⚠️ Много последовательных ошибок, увеличиваем интервал на {rate_limit_backoff:.1f}с")
-                        
-                        continue
+                    continue
                 
                 # Успешный запрос - сбрасываем счетчики
                 consecutive_errors = 0
                 if rate_limit_backoff > 0:
-                    logging.info("✅ HTTP запрос успешен, сбрасываем backoff")
+                    logging.info("✅ Загрузка успешна, сбрасываем backoff")
                     rate_limit_backoff = 0
                     last_429_time = None
+                
+                soup = BeautifulSoup(html, 'html.parser')
                 
                 # === ПАРСИНГ HTML ===
                 parse_start = time.time()
@@ -747,7 +794,7 @@ def main():
                     
                     # === ОТПРАВКА В TELEGRAM ===
                     telegram_start = time.time()
-                    notify_about_new_ids(session, soup, new_ids, detection_start=cycle_start_time, pause_between=0.5)
+                    notify_about_new_ids(soup, new_ids, detection_start=cycle_start_time, pause_between=0.5)
                     telegram_time = time.time() - telegram_start
                     
                     logging.info(f"  ⏱️ Отправка в Telegram: {telegram_time:.3f}s")
@@ -782,24 +829,20 @@ def main():
                     
                     logging.debug(f"✓ Проверка #{refresh_count}: новостей нет (max_id: {page_max_id})")
                 
-            except requests.exceptions.Timeout:
+            except asyncio.TimeoutError:
                 logging.warning("⚠️ Timeout при запросе, продолжаем...")
-                time.sleep(2)
-            
-            except requests.exceptions.ConnectionError as e:
-                logging.error(f"❌ Connection error: {e}")
-                logging.warning("⚠️ Ждем 5 секунд перед повторной попыткой...")
-                time.sleep(5)
+                await asyncio.sleep(2)
             
             except Exception as exc:
-                logging.error(f"❌ Неожиданная ошибка: {type(exc).__name__}: {exc}")
-                time.sleep(5)
+                logging.error(f"❌ Неожиданная ошибка в цикле: {type(exc).__name__}: {exc}")
+                await asyncio.sleep(5)
                 
     except KeyboardInterrupt:
         logging.info("⏹️ Остановка (Ctrl+C)")
     finally:
+        await parser.close()
         logging.info("✅ Сессия завершена")
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())

@@ -1,3 +1,4 @@
 requests
 beautifulsoup4
 python-dotenv
+playwright>=1.40.0
