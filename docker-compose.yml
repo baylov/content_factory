@@ -1,0 +1,100 @@
+version: '3.8'
+
+services:
+  upbit-notice-bot:
+    build: .
+    container_name: upbit-notice-bot
+    restart: unless-stopped
+    environment:
+      # Telegram Configuration (required)
+      - TELEGRAM_TOKEN=${TELEGRAM_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      
+      # Mode Configuration
+      - UPBIT_MODE=api                    # Default mode: api or html
+      - UPBIT_NO_AUTOFALLBACK=0            # Disable auto-fallback (0=enabled, 1=disabled)
+      
+      # Failure Detection Thresholds
+      - UPBIT_API_ERROR_THRESHOLD=5        # API failures before fallback to HTML
+      - UPBIT_API_RECOVERY_OK=20          # Consecutive successes before returning to API
+      
+      # Timing Configuration (milliseconds)
+      - UPBIT_API_SLEEP_MS=100,300        # API polling interval range
+      - UPBIT_HTML_REFRESH_MS=800,1200    # HTML refresh interval range
+      - UPBIT_JITTER_MS=20,40             # Jitter range for both modes
+      
+      # Optional: Debug mode
+      # - UPBIT_DEBUG=1
+      # - UPBIT_VERBOSE=1
+    
+    volumes:
+      # Persist state file
+      - ./data/last_notice.txt:/app/last_notice.txt
+      
+      # Persist logs
+      - ./logs:/app/logs
+      
+      # Optional: Mount custom config
+      # - ./config/.env:/app/.env:ro
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+          cpus: '0.1'
+    
+    # Health check
+    healthcheck:
+      test: |
+        python3 -c "
+        import requests
+        try:
+            r = requests.get('https://api-manager.upbit.com/v1/notices?page=1&per_page=1', timeout=5)
+            exit(0 if r.status_code == 200 else 1)
+        except:
+            exit(1)
+        " || \
+        python3 -c "
+        from selenium import webdriver
+        from selenium.webdriver.chrome.options import Options
+        try:
+            options = Options()
+            options.add_argument('--headless')
+            options.add_argument('--no-sandbox')
+            driver = webdriver.Chrome(options=options)
+            driver.get('https://upbit.com/service_center/notice')
+            driver.quit()
+            exit(0)
+        except:
+            exit(1)
+        "
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Network configuration
+    networks:
+      - upbot-network
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+      - /var/tmp:noexec,nosuid,size=50m
+
+networks:
+  upbot-network:
+    driver: bridge
+
+volumes:
+  upbot-logs:
+    driver: local
+  upbot-data:
+    driver: local

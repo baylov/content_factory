@@ -1,11 +1,62 @@
+# Environment and secrets
 .env
+.env.local
+.env.production
+
+# Logs
 logs/*.log
+logs/*.log.*
+*.log
+
+# State and temporary files
+last_notice.txt
+*.pid
+*.tmp
+*.temp
+
+# Python
 __pycache__/
 *.pyc
-last_notice.txt
+*.pyo
+*.pyd
+.Python
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+
+# Debug files
 debug_first_row.html
 upbit_page_debug.html
 upbit_debug.html
 api_discovery.json
 upbit_realtime_discovery.json
+
+# Virtual environments
 venv/
+env/
+.venv/
+.env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Node modules (if any)
+node_modules/
