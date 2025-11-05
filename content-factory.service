@@ -1,0 +1,40 @@
+[Unit]
+Description=Upbit Notice Bot - Content Factory Service
+Documentation=https://github.com/your-repo/upbit-notice-bot
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=upbot
+Group=upbot
+WorkingDirectory=/opt/upbit-notice-bot
+Environment=PATH=/opt/upbit-notice-bot/venv/bin
+ExecStart=/opt/upbit-notice-bot/venv/bin/python main.py
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=always
+RestartSec=10
+StandardOutput=append:/opt/upbit-notice-bot/logs/service.log
+StandardError=append:/opt/upbit-notice-bot/logs/service.error.log
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/upbit-notice-bot/logs /opt/upbit-notice-bot/last_notice.txt
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=512M
+TasksMax=100
+
+# Environment variables (can be overridden in /etc/systemd/system/upbit-notice-bot.service.d/override.conf)
+Environment=UPBIT_MODE=api
+Environment=UPBIT_API_ERROR_THRESHOLD=5
+Environment=UPBIT_API_RECOVERY_OK=20
+Environment=UPBIT_API_SLEEP_MS=100,300
+Environment=UPBIT_JITTER_MS=20,40
+
+[Install]
+WantedBy=multi-user.target
