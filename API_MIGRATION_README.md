@@ -16,7 +16,13 @@ Migrated from Selenium HTML parsing to direct Upbit API endpoint for **6-18x spe
 
 ## 🚀 Quick Start
 
-### Running in API Mode (Recommended)
+### Running in API Mode (Default)
+
+```bash
+python main.py
+```
+
+### Explicit API Mode Flag
 
 ```bash
 python main.py --api
@@ -25,8 +31,10 @@ python main.py --api
 ### Running in Selenium Mode (Legacy)
 
 ```bash
-python main.py
+python main.py --html  # или --legacy
 ```
+
+> Use the `UPBIT_MODE` environment variable (`api` / `html`) to set the mode without CLI flags. CLI flags always win.
 
 ## 📡 API Endpoint
 
@@ -166,20 +174,20 @@ session = create_api_session()
 
 # 2. Main loop
 while True:
-    # Get notices from API
-    notices = get_notices_via_api(session)
+    # Get notices + metadata from API
+    notices, meta = get_notices_via_api(session, return_metadata=True)
     
-    # Process new notices
-    process_new_notices(notices, session)
+    # Process new notices (stores last_notice.txt + sends alerts)
+    metrics = process_new_notices(notices, session)
     
-    # Sleep 1-2 seconds
-    time.sleep(random.uniform(1.0, 2.0))
+    # Sleep ~100-300ms + jitter 20-40ms
+    time.sleep(random.uniform(0.1, 0.3) + random.uniform(0.02, 0.04))
 ```
 
 ### Functions
 
 - `create_api_session()` - Creates HTTP session with retry mechanism
-- `get_notices_via_api(session)` - Fetches notices from API
+- `get_notices_via_api(session, return_metadata=False)` - Fetches notices (optionally with latency/error metadata)
 - `process_new_notices(notices, session)` - Detects and processes new notices
 - `send_notice_with_delay(notice, session)` - Sends notification with delay calculation
 - `main_api()` - Main loop for API mode

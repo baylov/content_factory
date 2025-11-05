@@ -5,6 +5,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 import re
 import random
+import math
 import json
 from logging.handlers import RotatingFileHandler
 
@@ -22,6 +23,20 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium_stealth import stealth
+
+from config import (
+    API_ERROR_THRESHOLD_ENV,
+    API_IDLE_BASE_RANGE,
+    API_IDLE_JITTER_RANGE,
+    DEFAULT_API_ERROR_THRESHOLD,
+    DEFAULT_MODE,
+    ENV_MODE_VAR,
+    SUMMARY_INTERVAL_SECONDS,
+    VALID_MODES,
+    get_api_error_threshold,
+    parse_cli_args,
+    resolve_mode,
+)
 
 load_dotenv()
 
@@ -1713,17 +1728,24 @@ def create_api_session():
     return session
 
 
-def get_notices_via_api(session):
+def get_notices_via_api(session, return_metadata=False):
     """
     Получение новостей через Upbit API
     
     Args:
         session: requests.Session с retry механизмом
+        return_metadata: Вернуть подробные метаданные (latency, error)
     
     Returns:
-        List[Dict]: Список новостей с полной информацией или [] при ошибке
+        List[Dict] или Tuple[List[Dict], Dict]: Список новостей или кортеж при return_metadata=True
     """
-    start_time = time.time()
+    start_time = time.perf_counter()
+    metadata = {
+        "latency": None,
+        "status": "unknown",
+        "status_code": None,
+        "error": None,
+    }
     
     url = "https://api-manager.upbit.com/api/v1/announcements"
     params = {
@@ -1740,37 +1762,57 @@ def get_notices_via_api(session):
     try:
         response = session.get(url, params=params, headers=headers, timeout=5)
         response.raise_for_status()
-        
         data = response.json()
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "success" if data.get("success") else "error",
+            "status_code": response.status_code,
+        })
         
         if data.get("success"):
             notices = data["data"]["notices"]
-            logging.info(f"✅ API: {len(notices)} новостей за {elapsed:.3f}s")
-            
-            # Возвращаем ВСЕ новости без фильтрации
-            return notices
+            logging.debug(f"✅ API: {len(notices)} новостей за {elapsed:.3f}s")
+            return (notices, metadata) if return_metadata else notices
         else:
+            metadata["error"] = "success=false"
             logging.error("❌ API returned success=false")
-            return []
-            
     except requests.Timeout:
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": "timeout",
+        })
         logging.error(f"⏱️ API timeout после {elapsed:.3f}s")
-        return []
     except requests.ConnectionError as e:
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": f"connection_error: {e}",
+        })
         logging.error(f"🔌 Connection error после {elapsed:.3f}s: {e}")
-        return []
     except requests.HTTPError as e:
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
         status_code = e.response.status_code if e.response else 'unknown'
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "status_code": status_code,
+            "error": f"http_{status_code}",
+        })
         logging.error(f"❌ HTTP {status_code} после {elapsed:.3f}s: {e}")
-        return []
     except Exception as e:
-        elapsed = time.time() - start_time
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": f"unexpected: {e}",
+        })
         logging.error(f"❌ API error после {elapsed:.3f}s: {e}")
-        return []
+    
+    return ([], metadata) if return_metadata else []
 
 
 def send_notice_with_delay(notice, session):
@@ -1793,7 +1835,8 @@ def send_notice_with_delay(notice, session):
     detected_at = datetime.now(ZoneInfo("Asia/Seoul"))
     
     # Вычисляем задержку обнаружения
-    delay = (detected_at - published_at).total_seconds()
+    delay_seconds = max((detected_at - published_at).total_seconds(), 0.0)
+    delay_ms = delay_seconds * 1000
     
     # Форматируем времена
     pub_time = published_at.strftime("%H:%M:%S")
@@ -1806,7 +1849,7 @@ def send_notice_with_delay(notice, session):
     logging.info(f"   🏷️ Категория: {category}")
     logging.info(f"   🕐 Опубликовано: {pub_date} {pub_time} KST")
     logging.info(f"   🕐 Обнаружено:   {detected_at.strftime('%Y-%m-%d')} {det_time} KST")
-    logging.info(f"   ⏱️ Задержка обнаружения: {delay:.3f}s")
+    logging.info(f"   ⏱️ Задержка обнаружения: {delay_ms:.0f} ms ({delay_seconds:.3f}s)")
     
     # Telegram сообщение
     message = f"""🆕 <b>Новая новость Upbit!</b>
@@ -1816,7 +1859,7 @@ def send_notice_with_delay(notice, session):
 📰 <b>{title}</b>
 
 🕐 Опубликовано: {pub_time}
-⏱️ Обнаружено через: {delay:.1f} сек
+⏱️ Обнаружено через: {delay_ms:.0f} мс ({delay_seconds:.2f} сек)
 
 🔗 https://upbit.com/service_center/notice?id={notice_id}"""
     
@@ -1851,112 +1894,245 @@ def process_new_notices(notices, session):
     Args:
         notices: List[Dict] - список новостей из API
         session: requests.Session для отправки уведомлений
-    """
-    if not notices:
-        return
     
-    # Получаем текущий максимальный ID
+    Returns:
+        dict: Метрики обработки (новые ID, max_id, last_known_id и т.д.)
+    """
+    metrics = {
+        "total_notices": len(notices) if notices else 0,
+        "max_id": None,
+        "last_known_id": None,
+        "updated_last_id": None,
+        "new_ids": [],
+        "processed": 0,
+    }
+    
+    last_known_id = get_last_max_id()
+    metrics["last_known_id"] = last_known_id
+    
+    if not notices:
+        metrics["updated_last_id"] = last_known_id
+        return metrics
+    
     current_ids = {n["id"] for n in notices}
     max_id = max(current_ids)
-    
-    # Читаем последний известный ID
-    last_known_id = get_last_max_id()
+    metrics["max_id"] = max_id
     
     if last_known_id is None:
-        # Первый запуск - сохраняем текущий max ID
         save_max_id(max_id)
+        metrics["updated_last_id"] = max_id
         logging.info(f"📊 Первый запуск: сохранён max_id={max_id}")
-        return
+        return metrics
     
     # Находим новые новости (ID больше последнего известного)
     new_notices = [n for n in notices if n["id"] > last_known_id]
     
     if new_notices:
-        # Сортируем по ID (от старых к новым)
         new_notices.sort(key=lambda x: x["id"])
+        new_ids = [notice["id"] for notice in new_notices]
+        metrics["new_ids"] = new_ids
+        metrics["processed"] = len(new_ids)
         
         logging.info(f"🔔 Обнаружено {len(new_notices)} новых новостей")
+        logging.info(f"   🆕 Новые ID: {new_ids}")
         
         for notice in new_notices:
             send_notice_with_delay(notice, session)
-            
-            # Небольшая пауза между уведомлениями
             if len(new_notices) > 1:
                 time.sleep(0.5)
         
-        # Обновляем последний ID
         save_max_id(max_id)
+        metrics["updated_last_id"] = max_id
         logging.info(f"📊 Обновлён max_id: {last_known_id} → {max_id}")
-
-
-def main_api():
-    """
-    Основной цикл с API (без Selenium)
-    """
-    logging.info("🚀 Upbit Notice Bot запущен (API MODE)")
-    logging.info("")
-    logging.info("📡 Режим: ПРЯМОЙ API")
-    logging.info("  ✓ Endpoint: https://api-manager.upbit.com/api/v1/announcements")
-    logging.info("  ✓ Без фильтрации - все новости")
-    logging.info("  ✓ Точная задержка обнаружения")
-    logging.info("  ⚡ СКОРОСТЬ: 0.1-0.3 секунды")
-    logging.info("  🛡️ СТАБИЛЬНОСТЬ: 100%")
-    logging.info("")
-    logging.info("🔄 Интервал проверки: 1-2 секунды")
-    logging.info("")
+    else:
+        metrics["updated_last_id"] = last_known_id
     
-    # Создаем HTTP session с retry механизмом
+    return metrics
+
+
+class ApiLoopTelemetry:
+    """Сбор и агрегирование метрик API цикла."""
+
+    def __init__(self, summary_interval=60):
+        self.summary_interval = summary_interval
+        self.last_summary_time = time.monotonic()
+        self.reset()
+
+    def reset(self):
+        self.cycle_durations = []
+        self.api_latencies = []
+        self.error_count = 0
+        self.cycle_count = 0
+
+    @staticmethod
+    def _percentile(values, percentile):
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = max(0, min(len(ordered) - 1, math.ceil(percentile / 100 * len(ordered)) - 1))
+        return ordered[index]
+
+    def record_cycle(self, cycle_duration, api_latency=None, error_occurred=False):
+        self.cycle_durations.append(cycle_duration)
+        if api_latency is not None:
+            self.api_latencies.append(api_latency)
+        if error_occurred:
+            self.error_count += 1
+        self.cycle_count += 1
+
+    def maybe_log_summary(self):
+        now = time.monotonic()
+        if now - self.last_summary_time < self.summary_interval or self.cycle_count == 0:
+            return
+
+        avg_cycle = sum(self.cycle_durations) / len(self.cycle_durations)
+        p95_cycle = self._percentile(self.cycle_durations, 95)
+        error_rate = self.error_count / self.cycle_count if self.cycle_count else 0
+        avg_api_latency = (
+            sum(self.api_latencies) / len(self.api_latencies)
+            if self.api_latencies
+            else None
+        )
+
+        latency_str = f"{avg_api_latency:.3f}s" if avg_api_latency is not None else "n/a"
+        p95_str = f"{p95_cycle:.3f}s" if p95_cycle is not None else "n/a"
+
+        logging.info(
+            "📈 60s summary: cycles=%d, avg_cycle=%.3fs, p95_cycle=%s, api_error_rate=%.2f%%, avg_api_latency=%s",
+            self.cycle_count,
+            avg_cycle,
+            p95_str,
+            error_rate * 100,
+            latency_str,
+        )
+
+        self.reset()
+        self.last_summary_time = now
+
+
+def main_api(
+    mode_selection=None,
+    summary_interval=60,
+    idle_base_range=(0.1, 0.3),
+    idle_jitter_range=(0.02, 0.04),
+    fallback_threshold=5,
+):
+    """Основной цикл API режима."""
+    timezone = ZoneInfo("Asia/Seoul")
+    base_min_ms = int(idle_base_range[0] * 1000)
+    base_max_ms = int(idle_base_range[1] * 1000)
+    jitter_min_ms = int(idle_jitter_range[0] * 1000)
+    jitter_max_ms = int(idle_jitter_range[1] * 1000)
+    fallback_threshold = max(1, int(fallback_threshold))
+
+    logging.info("🚀 Upbit Notice Bot запущен (API MODE)")
+    if mode_selection:
+        resolution_trace = " → ".join(mode_selection.resolution_path)
+        logging.info(f"🧭 Mode resolution: {resolution_trace}")
+    logging.info("📡 Режим: ПРЯМОЙ API")
+    logging.info("   • Endpoint: https://api-manager.upbit.com/api/v1/announcements")
+    logging.info("   • Timezone: Asia/Seoul")
+    logging.info(
+        "   • Target cycle: %d-%dms + jitter %d-%dms",
+        base_min_ms,
+        base_max_ms,
+        jitter_min_ms,
+        jitter_max_ms,
+    )
+    logging.info("   • Summary interval: %ds", summary_interval)
+    logging.info("   • ID tracking file: %s", LAST_NOTICE_FILE)
+    logging.info("")
+    logging.info('🛡️ HTTP session: retry total=3, backoff=0.3, status codes=[429, 500, 502, 503, 504]')
+    logging.info("⚠️ Fallback warning threshold: %d consecutive error cycles", fallback_threshold)
+    logging.info("")
+
     session = create_api_session()
     logging.info("✅ HTTP session создана с retry механизмом")
-    logging.info("  ✓ Retry: 3 попытки с exponential backoff")
-    logging.info("  ✓ Timeout: 5 секунд")
     logging.info("")
-    
+
+    telemetry = ApiLoopTelemetry(summary_interval=summary_interval)
     cycle = 0
-    
-    while True:
-        try:
+    consecutive_errors = 0
+    warning_issued = False
+
+    try:
+        while True:
             cycle += 1
-            cycle_start = time.time()
-            
-            current_time = datetime.now(ZoneInfo("Asia/Seoul"))
-            logging.info(f"🔄 Цикл #{cycle} в {current_time.strftime('%H:%M:%S')}...")
-            
-            # Получаем новости через API
-            notices = get_notices_via_api(session)
-            
-            if notices:
-                # Обрабатываем новые
-                process_new_notices(notices, session)
-            else:
-                logging.warning("⚠️ API не вернул новости, пропускаем цикл")
-            
-            cycle_time = time.time() - cycle_start
-            logging.info(f"⏱️ ━━━ ЦИКЛ #{cycle}: {cycle_time:.3f}s ━━━")
-            
-            if cycle_time < 0.3:
-                logging.info("⚡ ОТЛИЧНО: < 0.3s")
-            elif cycle_time < 0.5:
-                logging.info("✅ ХОРОШО: < 0.5s")
-            elif cycle_time < 1.0:
-                logging.info("✅ ПРИЕМЛЕМО: < 1.0s")
-            else:
-                logging.warning(f"⚠️ МЕДЛЕННО: {cycle_time:.3f}s")
-            
-            # Интервал между проверками: 1-2 секунды
-            sleep_time = random.uniform(1.0, 2.0)
-            logging.debug(f"💤 Сон {sleep_time:.2f}s...")
-            time.sleep(sleep_time)
-            
-        except KeyboardInterrupt:
-            logging.info("⏹️ Остановка (Ctrl+C)")
-            break
-        except Exception as e:
-            logging.error(f"❌ Неожиданная ошибка в цикле #{cycle}: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-            # Ждём перед следующей попыткой
-            time.sleep(5)
+            try:
+                cycle_start = time.perf_counter()
+
+                notices, metadata = get_notices_via_api(session, return_metadata=True)
+                api_latency = metadata.get("latency")
+                error_message = metadata.get("error")
+                status = metadata.get("status", "unknown")
+
+                current_kst = datetime.now(timezone)
+                timestamp_str = current_kst.strftime('%H:%M:%S.%f')[:-3]
+
+                metrics = process_new_notices(notices, session)
+                cycle_duration = time.perf_counter() - cycle_start
+
+                error_occurred = bool(error_message) or status == "error"
+                telemetry.record_cycle(cycle_duration, api_latency, error_occurred)
+
+                latency_str = f"{api_latency:.3f}s" if api_latency is not None else "n/a"
+                total_notices = metrics.get("total_notices", 0)
+                max_id = metrics.get("max_id")
+                last_known_id = metrics.get("last_known_id")
+                updated_last_id = metrics.get("updated_last_id")
+                new_ids = metrics.get("new_ids") or []
+                new_ids_display = new_ids if new_ids else "-"
+
+                logging.info(
+                    "🔄 Cycle #%d | ts_kst=%s | status=%s | cycle=%.3fs | api=%s | notices=%d | max_id=%s | last_known=%s | new_ids=%s",
+                    cycle,
+                    timestamp_str,
+                    "error" if error_occurred else "ok",
+                    cycle_duration,
+                    latency_str,
+                    total_notices,
+                    max_id if max_id is not None else "-",
+                    last_known_id if last_known_id is not None else "-",
+                    new_ids_display,
+                )
+
+                if updated_last_id is not None and updated_last_id != last_known_id:
+                    logging.debug("🗂️ last_notice.txt обновлён до %s", updated_last_id)
+
+                if error_occurred:
+                    consecutive_errors += 1
+                else:
+                    if consecutive_errors and warning_issued:
+                        logging.info("✅ API восстановлен после %d ошибок", consecutive_errors)
+                    consecutive_errors = 0
+                    warning_issued = False
+
+                if error_occurred and consecutive_errors >= fallback_threshold and not warning_issued:
+                    logging.warning(
+                        "🚨 API errors detected for %d consecutive cycles. Switch to HTML mode with '--html' or set UPBIT_MODE=html if issues persist.",
+                        consecutive_errors,
+                    )
+                    warning_issued = True
+
+                telemetry.maybe_log_summary()
+
+                base_sleep = random.uniform(*idle_base_range)
+                jitter = random.uniform(*idle_jitter_range)
+                sleep_time = max(0.0, base_sleep + jitter)
+                logging.debug(
+                    "💤 Сон %.0fms (base %.0fms + jitter %.0fms)",
+                    sleep_time * 1000,
+                    base_sleep * 1000,
+                    jitter * 1000,
+                )
+                time.sleep(sleep_time)
+            except Exception as cycle_error:
+                logging.error("❌ Неожиданная ошибка в цикле #%d: %s", cycle, cycle_error)
+                logging.debug("Traceback:", exc_info=True)
+                telemetry.maybe_log_summary()
+                time.sleep(1)
+    except KeyboardInterrupt:
+        logging.info("⏹️ Остановка (Ctrl+C)")
 
 
 def main():
@@ -2300,14 +2476,69 @@ def main():
 
 
 if __name__ == "__main__":
-    import sys
-    
-    # Проверяем аргументы командной строки
-    if len(sys.argv) > 1 and sys.argv[1] == "--api":
-        # Запускаем в режиме API
-        main_api()
+    args = parse_cli_args()
+
+    try:
+        mode_selection = resolve_mode(args)
+    except ValueError as exc:
+        logging.error("❌ %s", exc)
+        raise SystemExit(1) from exc
+
+    resolution_chain = " → ".join(mode_selection.resolution_path)
+    logging.info("🧭 Mode resolution chain: %s", resolution_chain)
+    logging.info("🎯 Selected mode: %s", mode_selection.mode.upper())
+    logging.info("   CLI flag: %s", mode_selection.cli_source or "none")
+
+    env_raw_value = os.getenv(ENV_MODE_VAR)
+    if mode_selection.env_source:
+        logging.info("   Env override: %s=%s", ENV_MODE_VAR, mode_selection.env_source)
+    elif env_raw_value:
+        logging.warning(
+            "⚠️ Ignoring invalid %s=%s (allowed: %s)",
+            ENV_MODE_VAR,
+            env_raw_value,
+            ", ".join(sorted(VALID_MODES)),
+        )
     else:
-        # Запускаем в режиме Selenium (по умолчанию для совместимости)
-        logging.info("💡 Совет: используйте --api для режима прямого API (6-18x быстрее)")
-        logging.info("")
+        logging.info("   Env override: %s=not set", ENV_MODE_VAR)
+
+    logging.info("   Default fallback: %s", DEFAULT_MODE)
+
+    api_error_threshold, raw_threshold = get_api_error_threshold()
+    if raw_threshold is not None:
+        try:
+            parsed_raw = int(raw_threshold)
+        except ValueError:
+            parsed_raw = None
+        if parsed_raw is None or parsed_raw < 1:
+            logging.warning(
+                "⚠️ Invalid %s=%s. Using default value %d.",
+                API_ERROR_THRESHOLD_ENV,
+                raw_threshold,
+                DEFAULT_API_ERROR_THRESHOLD,
+            )
+            api_error_threshold = DEFAULT_API_ERROR_THRESHOLD
+        else:
+            logging.info(
+                "   API error warning threshold: %d (from %s)",
+                api_error_threshold,
+                API_ERROR_THRESHOLD_ENV,
+            )
+    else:
+        logging.info(
+            "   API error warning threshold: %d (default)",
+            api_error_threshold,
+        )
+
+    if mode_selection.mode == "api":
+        main_api(
+            mode_selection=mode_selection,
+            summary_interval=SUMMARY_INTERVAL_SECONDS,
+            idle_base_range=API_IDLE_BASE_RANGE,
+            idle_jitter_range=API_IDLE_JITTER_RANGE,
+            fallback_threshold=api_error_threshold,
+        )
+    else:
+        logging.info("📡 Режим: legacy HTML (операторский fallback)")
+        logging.info("   Для API режима запустите без флагов или используйте --api")
         main()

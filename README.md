@@ -78,15 +78,22 @@ TELEGRAM_CHAT_ID=your_chat_id_here
 
 ### Запуск
 
-**API Mode (рекомендуется):**
+**По умолчанию (API Mode):**
+```bash
+python3 main.py
+```
+
+**Явный запуск API Mode:**
 ```bash
 python3 main.py --api
 ```
 
-**Selenium Mode (legacy):**
+**Legacy HTML Mode:**
 ```bash
-python3 main.py
+python3 main.py --html  # или --legacy
 ```
+
+> 💡 Переменная окружения `UPBIT_MODE` (значения: `api` или `html`) позволяет задать режим без флагов. CLI-флаги имеют приоритет над переменной.
 
 ### Тестирование
 
@@ -164,13 +171,17 @@ CPU: 15-25%
 
 - `TELEGRAM_TOKEN` - токен Telegram бота
 - `TELEGRAM_CHAT_ID` - ID чата для уведомлений
+- `UPBIT_MODE` - режим запуска (`api` по умолчанию, `html` для HTML fallback)
+- `UPBIT_API_ERROR_THRESHOLD` - порог подряд идущих API-ошибок для предупреждения (по умолчанию 5)
 
 ### Настройки в коде
 
-- **Интервал проверки:** 1-2 секунды (случайный)
-- **Page load strategy:** `eager` (не ждет все ресурсы)
-- **Polling интервал:** 20ms (проверка появления новостей) ⚡
-- **Max wait:** 0.3 сек (ожидание новостей) ⚡
+- **API polling cadence:** 100–300 мс + джиттер 20–40 мс (по умолчанию)
+- **API summary interval:** 60 секунд (агрегация метрик цикла)
+- **HTML refresh interval (legacy):** 1–2 секунды + human delay
+- **Page load strategy (legacy):** `eager` (не ждет все ресурсы)
+- **Polling интервал (legacy):** 20ms (проверка появления новостей) ⚡
+- **Max wait (legacy):** 0.3 сек (ожидание новостей) ⚡
 
 ## 📚 Документация
 
