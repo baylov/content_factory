@@ -7,7 +7,7 @@ Test script - проверка стабильности парсера на 100 
 import sys
 import time
 import logging
-from main import init_driver, get_all_notice_ids, UPBIT_NOTICE_URL
+from main import init_driver, get_all_notice_ids, get_last_parse_stats, UPBIT_NOTICE_URL
 
 logging.basicConfig(
     level=logging.INFO,
@@ -16,7 +16,7 @@ logging.basicConfig(
 
 def test_stability(cycles=100):
     """
-    Тестирует стабильность парсера на N циклов
+    Тестирует стабильность парсера на N циклов с отслеживанием fallback
     """
     logging.info("=" * 80)
     logging.info(f"🧪 ТЕСТ СТАБИЛЬНОСТИ: {cycles} ЦИКЛОВ")
@@ -38,7 +38,9 @@ def test_stability(cycles=100):
         'failed': 0,
         'times': [],
         'strategies': {},
-        'counts': []
+        'counts': [],
+        'fallback_invocations': 0,
+        'cycles_with_fallback': []
     }
     
     try:
@@ -57,11 +59,20 @@ def test_stability(cycles=100):
             
             elapsed = time.time() - start
             
+            # Получаем статистику парсинга
+            parse_stats = get_last_parse_stats()
+            
             # Проверяем результат
             if notice_ids and len(notice_ids) > 0:
                 stats['success'] += 1
                 stats['times'].append(elapsed)
                 stats['counts'].append(len(notice_ids))
+                
+                # Отслеживаем fallback
+                if parse_stats.get('fallback_invoked', False):
+                    stats['fallback_invocations'] += 1
+                    stats['cycles_with_fallback'].append(cycle)
+                    logging.warning(f"🛡️ Цикл #{cycle}: Fallback был активирован!")
                 
                 logging.info(f"✅ Цикл #{cycle}: Успешно - {len(notice_ids)} новостей за {elapsed:.3f}s")
             else:
@@ -108,6 +119,16 @@ def test_stability(cycles=100):
             logging.info(f"   • Среднее: {avg_count:.1f}")
             logging.info(f"   • Минимум: {min_count}")
             logging.info(f"   • Максимум: {max_count}")
+        
+        # Статистика fallback
+        if stats['fallback_invocations'] > 0:
+            logging.info(f"🛡️ Fallback активаций:")
+            logging.info(f"   • Всего: {stats['fallback_invocations']} раз")
+            logging.info(f"   • Циклы: {stats['cycles_with_fallback'][:10]}{'...' if len(stats['cycles_with_fallback']) > 10 else ''}")
+            fallback_rate = (stats['fallback_invocations'] / stats['success']) * 100
+            logging.info(f"   • Частота: {fallback_rate:.1f}% успешных циклов")
+        else:
+            logging.info(f"🛡️ Fallback активаций: 0 (отличная фильтрация!)")
     
     logging.info("=" * 80)
     
@@ -115,6 +136,10 @@ def test_stability(cycles=100):
     if stats['failed'] == 0 and stats['success'] == cycles:
         logging.info("🎉 ВСЕ ТЕСТЫ ПРОЙДЕНЫ!")
         logging.info(f"✅ {cycles} циклов подряд - ВСЕ успешные")
+        if stats['fallback_invocations'] == 0:
+            logging.info(f"✅ Нет чрезмерной фильтрации - fallback не потребовался")
+        else:
+            logging.info(f"ℹ️ Fallback сработал {stats['fallback_invocations']} раз(а), но все циклы успешны")
         return True
     else:
         logging.error("❌ ТЕСТЫ НЕ ПРОЙДЕНЫ!")
