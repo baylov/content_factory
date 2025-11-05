@@ -40,6 +40,43 @@ def test_wait_for_notices_max_wait():
         return max_wait <= 0.3
 
 
+def test_readiness_probe_exists():
+    """
+    Проверяет что существует функция check_readiness_probe
+    """
+    print("\n" + "=" * 70)
+    print("ТЕСТ 1.5: Существует функция check_readiness_probe")
+    print("=" * 70)
+    
+    with open('main.py', 'r', encoding='utf-8') as f:
+        content = f.read()
+    
+    # Ищем определение функции check_readiness_probe
+    if 'def check_readiness_probe(driver):' in content:
+        print("✅ Функция check_readiness_probe найдена")
+        
+        # Проверяем ключевые элементы
+        checks = {
+            'readyState check': 'document.readyState' in content,
+            'container visibility': 'containerVisible' in content,
+            'strategy tracking': "result.strategy = 'exact_id'" in content or "result.strategy = 'all_notice'" in content,
+            'ready flag': 'result.ready' in content,
+        }
+        
+        all_passed = True
+        for check_name, passed in checks.items():
+            if passed:
+                print(f"  ✓ {check_name}")
+            else:
+                print(f"  ✗ {check_name}")
+                all_passed = False
+        
+        return all_passed
+    else:
+        print("❌ Функция check_readiness_probe не найдена")
+        return False
+
+
 def test_polling_interval():
     """
     Проверяет что polling interval снижен с 50ms (0.05) до 20ms (0.02)
@@ -86,12 +123,12 @@ def test_quick_check_after_refresh():
     with open('main.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Ищем комментарий о быстрой проверке
+    # Ищем комментарий о быстрой проверке и использование readiness probe
     quick_check_patterns = [
         r'БЫСТРАЯ ПРОВЕРКА',
-        r'Новости УЖЕ ЕСТЬ',
-        r'пропускаем ожидание',
-        r'quick_check',
+        r'check_readiness_probe',
+        r'skip wait',
+        r'ready immediately',
     ]
     
     found_patterns = []
@@ -105,7 +142,7 @@ def test_quick_check_after_refresh():
         print(f"  ✓ {pattern}")
     
     if len(found_patterns) >= 3:
-        print("✅ Быстрая проверка сразу после refresh реализована")
+        print("✅ Быстрая проверка с readiness probe реализована")
         return True
     else:
         print("❌ Быстрая проверка не найдена или не полностью реализована")
@@ -123,11 +160,13 @@ def test_optimizations_logging():
     with open('main.py', 'r', encoding='utf-8') as f:
         content = f.read()
     
-    # Ищем обновлённое логирование
+    # Ищем обновлённое логирование с probe stats
     optimizations_patterns = [
         r'polling 20ms',
         r'max 0\.3s',
-        r'Быстрая проверка сразу после refresh',
+        r'readiness probe',
+        r'probe_stats',
+        r'poll_count',
     ]
     
     found_patterns = []
@@ -140,8 +179,8 @@ def test_optimizations_logging():
     for pattern in found_patterns:
         print(f"  ✓ {pattern}")
     
-    if len(found_patterns) >= 2:
-        print("✅ Логирование оптимизаций обновлено")
+    if len(found_patterns) >= 3:
+        print("✅ Логирование с probe stats обновлено")
         return True
     else:
         print("⚠️ Логирование оптимизаций не полностью обновлено")
@@ -192,6 +231,7 @@ def main():
     
     tests = [
         ("max_wait снижен до 0.3s", test_wait_for_notices_max_wait),
+        ("Readiness probe существует", test_readiness_probe_exists),
         ("polling interval снижен до 20ms", test_polling_interval),
         ("Быстрая проверка после refresh", test_quick_check_after_refresh),
         ("Логирование оптимизаций", test_optimizations_logging),
@@ -228,11 +268,13 @@ def main():
     if passed == total:
         print("🎉 ВСЕ ТЕСТЫ ПРОЙДЕНЫ!")
         print("\n✅ Критерии приёмки:")
-        print("  1. ✅ max_wait уменьшен с 1.0 до 0.3 секунд")
-        print("  2. ✅ Polling interval уменьшен с 50ms до 20ms")
-        print("  3. ✅ Быстрая проверка сразу после refresh")
-        print("  4. ✅ Целевое время цикла: < 1.5 секунды")
-        print("  5. ✅ Wait time: < 0.3 секунды")
+        print("  1. ✅ Lightweight readiness probe реализован")
+        print("  2. ✅ max_wait уменьшен с 1.0 до 0.3 секунд")
+        print("  3. ✅ Polling interval уменьшен с 50ms до 20ms")
+        print("  4. ✅ Быстрая проверка с readiness probe")
+        print("  5. ✅ Structured logging (probe duration, poll count, strategy)")
+        print("  6. ✅ Целевое время цикла: < 1.5 секунды")
+        print("  7. ✅ Wait time: < 0.3 секунды")
         return True
     else:
         print(f"❌ НЕКОТОРЫЕ ТЕСТЫ НЕ ПРОШЛИ: {total - passed} из {total}")

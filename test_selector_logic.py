@@ -135,48 +135,45 @@ def test_selector_unification():
     
     print()
     
-    # Проверяем wait_for_notices_js
-    print("5. Проверка wait_for_notices_js() использует те же стратегии...")
+    # Проверяем wait_for_notices_js и readiness probe
+    print("5. Проверка wait_for_notices_js() использует readiness probe...")
     
-    wait_func_pattern = r'def wait_for_notices_js\([^)]*\):(.*?)(?=\ndef )'
-    wait_match = re.search(wait_func_pattern, code, re.DOTALL)
-    
-    if wait_match:
-        wait_code = wait_match.group(1)
+    # Проверяем что функция вызывает check_readiness_probe
+    if 'check_readiness_probe(driver)' in code:
+        print("   ✅ wait_for_notices_js() использует check_readiness_probe")
         
-        # Проверяем, что используются все 4 селектора
-        all_selectors_found = all(sel in wait_code for sel in expected_selectors)
+        # Проверяем, что readiness probe содержит все 4 селектора
+        probe_pattern = r'def check_readiness_probe\(driver\):(.*?)(?=\ndef )'
+        probe_match = re.search(probe_pattern, code, re.DOTALL)
         
-        if all_selectors_found:
-            print("   ✅ wait_for_notices_js() использует все 4 fallback селектора")
+        if probe_match:
+            probe_code = probe_match.group(1)
+            all_selectors_found = all(sel in probe_code for sel in expected_selectors)
+            
+            if all_selectors_found:
+                print("   ✅ check_readiness_probe() содержит все 4 fallback селектора")
+            else:
+                print("   ❌ check_readiness_probe() не содержит все fallback селекторы")
+                return False
         else:
-            print("   ❌ wait_for_notices_js() не использует все fallback селекторы")
+            print("   ❌ Функция check_readiness_probe() не найдена")
             return False
     else:
-        print("   ❌ Функция wait_for_notices_js() не найдена")
+        print("   ❌ wait_for_notices_js() не использует check_readiness_probe")
         return False
     
     print()
     
     # Проверяем quick check в get_all_notice_ids_with_api
-    print("6. Проверка quick check использует те же стратегии...")
+    print("6. Проверка quick check использует readiness probe...")
     
-    quick_check_pattern = r'# БЫСТРАЯ ПРОВЕРКА.*?driver\.execute_script\("""(.*?)"""'
+    quick_check_pattern = r'# БЫСТРАЯ ПРОВЕРКА.*?check_readiness_probe\(driver\)'
     quick_match = re.search(quick_check_pattern, code, re.DOTALL)
     
     if quick_match:
-        quick_code = quick_match.group(1)
-        
-        # Проверяем, что используются все 4 селектора
-        all_selectors_found = all(sel in quick_code for sel in expected_selectors)
-        
-        if all_selectors_found:
-            print("   ✅ Quick check использует все 4 fallback селектора")
-        else:
-            print("   ⚠️  Quick check может не использовать все селекторы")
-            # Не критично, но предупредим
+        print("   ✅ Quick check использует check_readiness_probe (единая реализация)")
     else:
-        print("   ⚠️  Quick check не найден (может быть изменён)")
+        print("   ⚠️  Quick check может не использовать readiness probe")
     
     print()
     
@@ -204,8 +201,9 @@ def test_selector_unification():
     print("Изменения:")
     print("  ✓ Стратегия 'notice_links' переименована в 'all_notice'")
     print("  ✓ Все 4 fallback стратегии унифицированы")
-    print("  ✓ wait_for_notices_js() использует те же стратегии")
-    print("  ✓ Quick check использует те же стратегии")
+    print("  ✓ check_readiness_probe() содержит все стратегии")
+    print("  ✓ wait_for_notices_js() использует readiness probe")
+    print("  ✓ Quick check использует readiness probe (единая реализация)")
     print("  ✓ Логирование показывает стратегию и количество ссылок")
     print("  ✓ Документация обновлена")
     print()

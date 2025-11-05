@@ -311,52 +311,149 @@ def debug_save_html_and_find_selectors(driver):
         return None
 
 
+def check_readiness_probe(driver):
+    """
+    Lightweight readiness probe that collects document state, visibility, 
+    and link counts in a single execute_script call.
+    
+    Returns dict with:
+        - ready: bool - whether content is ready
+        - readyState: str - document.readyState
+        - count: int - number of notice links found
+        - strategy: str - which selector strategy found links
+        - containerVisible: bool - whether notice container is visible
+    """
+    return driver.execute_script("""
+        const result = {
+            ready: false,
+            readyState: document.readyState,
+            count: 0,
+            strategy: null,
+            containerVisible: false
+        };
+        
+        // Check if document is at least interactive
+        if (document.readyState === 'loading') {
+            return result;
+        }
+        
+        // Check container visibility (common notice containers)
+        const containers = document.querySelectorAll('table, .notice-list, [class*="notice"], tbody');
+        result.containerVisible = containers.length > 0;
+        
+        // Strategy 1: Exact selector with ?id=
+        let links = document.querySelectorAll('a[href*="/service_center/notice?id="]');
+        if (links.length > 0) {
+            result.count = links.length;
+            result.strategy = 'exact_id';
+            result.ready = true;
+            return result;
+        }
+        
+        // Strategy 2: Any links with /service_center/notice
+        links = document.querySelectorAll('a[href*="/service_center/notice"]');
+        if (links.length > 0) {
+            result.count = links.length;
+            result.strategy = 'all_notice';
+            result.ready = true;
+            return result;
+        }
+        
+        // Strategy 3: Links in table rows
+        links = document.querySelectorAll('tr a[href*="notice"]');
+        if (links.length > 0) {
+            result.count = links.length;
+            result.strategy = 'tr_notice';
+            result.ready = true;
+            return result;
+        }
+        
+        // Strategy 4: Any links with id=
+        links = document.querySelectorAll('a[href*="id="]');
+        if (links.length > 0) {
+            result.count = links.length;
+            result.strategy = 'any_id';
+            result.ready = true;
+            return result;
+        }
+        
+        return result;
+    """)
+
+
 def wait_for_notices_js(driver, max_wait=0.3):
     """
     Ждет появления новостей, проверяя каждые 20ms.
-    Использует те же fallback стратегии, что и get_all_notice_ids().
-    Возвращает True если новости появились, False если timeout.
+    Использует lightweight readiness probe с отслеживанием стабильности.
+    
+    Returns:
+        tuple: (ready: bool, probe_stats: dict)
+            probe_stats содержит: duration, poll_count, strategy
     """
     start = time.time()
     check_interval = 0.02  # 20ms
+    poll_count = 0
+    
+    last_count = -1
+    stable_count = 0
+    required_stable_samples = 2  # Require 2 consecutive stable samples
+    
+    detected_strategy = None
     
     while time.time() - start < max_wait:
         try:
-            # Используем те же стратегии, что и в get_all_notice_ids
-            count = driver.execute_script("""
-                // Стратегия 1: Точный селектор с ?id=
-                let count = document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
-                
-                // Стратегия 2: Любые ссылки с notice
-                if (count === 0) {
-                    count = document.querySelectorAll('a[href*="/service_center/notice"]').length;
-                }
-                
-                // Стратегия 3: Ссылки в таблице
-                if (count === 0) {
-                    count = document.querySelectorAll('tr a[href*="notice"]').length;
-                }
-                
-                // Стратегия 4: Любые ссылки с id=
-                if (count === 0) {
-                    count = document.querySelectorAll('a[href*="id="]').length;
-                }
-                
-                return count;
-            """)
+            poll_count += 1
+            probe_result = check_readiness_probe(driver)
             
-            if count > 0:
+            # Track stability - same count multiple times
+            if probe_result['count'] == last_count and probe_result['count'] > 0:
+                stable_count += 1
+            else:
+                stable_count = 0
+                last_count = probe_result['count']
+            
+            # Short-circuit if ready and stable
+            if probe_result['ready'] and stable_count >= required_stable_samples:
                 elapsed = time.time() - start
-                logging.info(f"⚡ Новости появились за {elapsed:.3f}s")
-                return True
-        except:
-            pass
+                detected_strategy = probe_result['strategy']
+                
+                probe_stats = {
+                    'duration': elapsed,
+                    'poll_count': poll_count,
+                    'strategy': detected_strategy,
+                    'stable_samples': stable_count + 1,
+                    'final_count': probe_result['count']
+                }
+                
+                logging.info(
+                    f"⚡ Notices ready: {elapsed*1000:.0f}ms "
+                    f"(polls: {poll_count}, strategy: {detected_strategy}, "
+                    f"count: {probe_result['count']}, stable: {stable_count + 1})"
+                )
+                return True, probe_stats
+            
+            # Also accept if ready without full stability (for speed)
+            if probe_result['ready']:
+                detected_strategy = probe_result['strategy']
+        
+        except Exception as e:
+            logging.debug(f"Probe error: {e}")
         
         time.sleep(check_interval)
     
     elapsed = time.time() - start
-    logging.warning(f"⚠️ Новости не появились за {elapsed:.3f}s")
-    return False
+    probe_stats = {
+        'duration': elapsed,
+        'poll_count': poll_count,
+        'strategy': detected_strategy,
+        'timed_out': True
+    }
+    
+    logging.warning(
+        f"⚠️ Wait timeout: {elapsed*1000:.0f}ms "
+        f"(polls: {poll_count}, strategy: {detected_strategy or 'none'})"
+    )
+    return False, probe_stats
 
 
 def get_all_notice_ids(driver):
@@ -1172,52 +1269,56 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
         logging.error(f"❌ Ошибка загрузки страницы для HTML fallback: {load_error}")
         return [], "FAILED", {"total": time.time() - start_time}
     
-    # БЫСТРАЯ ПРОВЕРКА: новости уже есть? (используем те же fallback стратегии)
+    # БЫСТРАЯ ПРОВЕРКА: используем readiness probe
     wait_start = time.time()
     quick_check_start = time.time()
+    probe_stats = None
+    
     try:
-        count = driver.execute_script("""
-            // Стратегия 1: Точный селектор с ?id=
-            let count = document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
-            
-            // Стратегия 2: Любые ссылки с notice
-            if (count === 0) {
-                count = document.querySelectorAll('a[href*="/service_center/notice"]').length;
-            }
-            
-            // Стратегия 3: Ссылки в таблице
-            if (count === 0) {
-                count = document.querySelectorAll('tr a[href*="notice"]').length;
-            }
-            
-            // Стратегия 4: Любые ссылки с id=
-            if (count === 0) {
-                count = document.querySelectorAll('a[href*="id="]').length;
-            }
-            
-            return count;
-        """)
+        # Use the same readiness probe for quick check
+        probe_result = check_readiness_probe(driver)
         quick_check_time = (time.time() - quick_check_start) * 1000
         
-        if count > 0:
+        if probe_result['ready']:
             # Новости УЖЕ ЕСТЬ! Не ждём дополнительно
             wait_time = time.time() - wait_start
-            logging.info(f"⚡ Новости в HTML сразу после refresh ({quick_check_time:.0f}ms) - пропускаем ожидание")
+            probe_stats = {
+                'duration': wait_time,
+                'poll_count': 1,
+                'strategy': probe_result['strategy'],
+                'quick_check': True,
+                'final_count': probe_result['count']
+            }
+            logging.info(
+                f"⚡ Notices ready immediately: {quick_check_time:.0f}ms "
+                f"(strategy: {probe_result['strategy']}, count: {probe_result['count']}) - skip wait"
+            )
         else:
             # Ждём появления
-            logging.info(f"⏳ Новости не найдены сразу ({quick_check_time:.0f}ms) - ждём...")
-            notices_appeared = wait_for_notices_js(driver, max_wait=0.3)
+            logging.info(
+                f"⏳ Notices not ready immediately ({quick_check_time:.0f}ms, "
+                f"readyState: {probe_result['readyState']}) - waiting..."
+            )
+            notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.3)
             wait_time = time.time() - wait_start
             
-            if not notices_appeared:
-                logging.warning(f"  ⚠️ Новости не появились за 0.3s")
+            if not notices_ready:
+                logging.warning(f"  ⚠️ Notices not ready after {wait_time:.3f}s")
     except Exception as check_error:
         # Если быстрая проверка не сработала, используем обычное ожидание
-        logging.debug(f"Быстрая проверка не удалась: {check_error}, используем обычное ожидание")
-        notices_appeared = wait_for_notices_js(driver, max_wait=0.3)
+        logging.debug(f"Quick check failed: {check_error}, using standard wait")
+        notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.3)
         wait_time = time.time() - wait_start
     
-    logging.info(f"  ⏱️ Ожидание новостей (HTML): {wait_time:.3f}s")
+    # Log structured wait phase metrics
+    if probe_stats:
+        logging.info(
+            f"  ⏱️ Wait phase (HTML): {wait_time:.3f}s "
+            f"(polls: {probe_stats.get('poll_count', 0)}, "
+            f"strategy: {probe_stats.get('strategy', 'unknown')})"
+        )
+    else:
+        logging.info(f"  ⏱️ Wait phase (HTML): {wait_time:.3f}s")
     
     parse_start = time.time()
     notice_ids = get_all_notice_ids(driver)
@@ -1228,6 +1329,7 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
         "page_load": page_load_time,
         "wait": wait_time,
         "parse": parse_time,
+        "probe_stats": probe_stats,
     }
     
     if notice_ids:
@@ -1242,7 +1344,14 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
         else:
             logging.warning(f"  ⚠️ МЕДЛЕННО: Полный цикл {total_time:.3f} сек")
         
-        logging.info(f"     ⏱️ Load {page_load_time:.3f}s | Wait {wait_time:.3f}s | Parse {parse_time:.3f}s")
+        # Enhanced logging with probe stats
+        if probe_stats:
+            logging.info(
+                f"     ⏱️ Load {page_load_time:.3f}s | Wait {wait_time:.3f}s | Parse {parse_time:.3f}s | "
+                f"Probe: {probe_stats.get('poll_count', 0)} polls, strategy: {probe_stats.get('strategy', 'unknown')}"
+            )
+        else:
+            logging.info(f"     ⏱️ Load {page_load_time:.3f}s | Wait {wait_time:.3f}s | Parse {parse_time:.3f}s")
     
     return notice_ids, "HTML", {"total": total_time, "html": html_details}
 
@@ -1266,8 +1375,10 @@ def main():
     logging.info("  ✓ Selenium headless Chrome с STEALTH")
     logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
+    logging.info("  ✓ Lightweight readiness probe (document state + visibility)")
     logging.info("  ✓ Быстрая проверка сразу после refresh")
     logging.info("  ✓ Умное ожидание (polling 20ms, max 0.3s)")
+    logging.info("  ✓ Consecutive stable samples tracking")
     logging.info("  ✓ Быстрый HTML парсинг")
     logging.info("  ✓ Автодиагностика при ошибках")
     logging.info("  ✓ Детальные метрики на каждом этапе")
