@@ -40,7 +40,11 @@ def test_stability(cycles=100):
         'strategies': {},
         'counts': [],
         'fallback_invocations': 0,
-        'cycles_with_fallback': []
+        'cycles_with_fallback': [],
+        'strategy_1_hits': 0,
+        'strategy_1_misses': 0,
+        'exact_id_retry_attempts': [],
+        'exact_id_retry_times': []
     }
     
     try:
@@ -68,13 +72,37 @@ def test_stability(cycles=100):
                 stats['times'].append(elapsed)
                 stats['counts'].append(len(notice_ids))
                 
+                # Отслеживаем Strategy 1 success rate
+                strategy_stats = parse_stats.get('strategy_stats', {})
+                if strategy_stats.get('exact_id_success', False):
+                    stats['strategy_1_hits'] += 1
+                else:
+                    stats['strategy_1_misses'] += 1
+                
+                # Отслеживаем retry attempts и timing
+                if 'exact_id_attempts' in strategy_stats:
+                    stats['exact_id_retry_attempts'].append(strategy_stats['exact_id_attempts'])
+                if 'exact_id_retry_time' in strategy_stats:
+                    stats['exact_id_retry_times'].append(strategy_stats['exact_id_retry_time'])
+                
                 # Отслеживаем fallback
                 if parse_stats.get('fallback_invoked', False):
                     stats['fallback_invocations'] += 1
                     stats['cycles_with_fallback'].append(cycle)
                     logging.warning(f"🛡️ Цикл #{cycle}: Fallback был активирован!")
                 
-                logging.info(f"✅ Цикл #{cycle}: Успешно - {len(notice_ids)} новостей за {elapsed:.3f}s")
+                # Логируем Strategy 1 статус
+                strategy_used = strategy_stats.get('strategy_used', 'unknown')
+                if strategy_used == 'exact_id':
+                    logging.info(
+                        f"✅ Цикл #{cycle}: Успешно - {len(notice_ids)} новостей за {elapsed:.3f}s "
+                        f"(Strategy 1 ✓, {strategy_stats.get('exact_id_attempts', 1)} attempt(s))"
+                    )
+                else:
+                    logging.info(
+                        f"✅ Цикл #{cycle}: Успешно - {len(notice_ids)} новостей за {elapsed:.3f}s "
+                        f"(Strategy {strategy_used}, fallback reason: {strategy_stats.get('fallback_reason', 'unknown')})"
+                    )
             else:
                 stats['failed'] += 1
                 logging.error(f"❌ Цикл #{cycle}: ПРОВАЛ - новости не найдены!")
@@ -119,6 +147,45 @@ def test_stability(cycles=100):
             logging.info(f"   • Среднее: {avg_count:.1f}")
             logging.info(f"   • Минимум: {min_count}")
             logging.info(f"   • Максимум: {max_count}")
+        
+        # Статистика Strategy 1 hit rate
+        total_strategy_attempts = stats['strategy_1_hits'] + stats['strategy_1_misses']
+        if total_strategy_attempts > 0:
+            strategy_1_rate = (stats['strategy_1_hits'] / total_strategy_attempts) * 100
+            logging.info(f"🎯 Strategy 1 (exact_id) success rate:")
+            logging.info(f"   • Hits: {stats['strategy_1_hits']}")
+            logging.info(f"   • Misses: {stats['strategy_1_misses']}")
+            logging.info(f"   • Success rate: {strategy_1_rate:.1f}%")
+            
+            if strategy_1_rate >= 90:
+                logging.info(f"   ✅ SUCCESS: ≥90% target achieved!")
+            else:
+                logging.warning(f"   ⚠️ BELOW TARGET: <90% (target: ≥90%)")
+        
+        # Статистика retry attempts
+        if stats['exact_id_retry_attempts']:
+            avg_attempts = sum(stats['exact_id_retry_attempts']) / len(stats['exact_id_retry_attempts'])
+            max_attempts = max(stats['exact_id_retry_attempts'])
+            min_attempts = min(stats['exact_id_retry_attempts'])
+            
+            logging.info(f"🔄 Retry statistics:")
+            logging.info(f"   • Avg attempts: {avg_attempts:.2f}")
+            logging.info(f"   • Min attempts: {min_attempts}")
+            logging.info(f"   • Max attempts: {max_attempts}")
+        
+        # Статистика retry timing
+        if stats['exact_id_retry_times']:
+            avg_retry_time = sum(stats['exact_id_retry_times']) / len(stats['exact_id_retry_times'])
+            max_retry_time = max(stats['exact_id_retry_times'])
+            
+            logging.info(f"⏱️ Retry timing:")
+            logging.info(f"   • Avg retry time: {avg_retry_time*1000:.0f}ms")
+            logging.info(f"   • Max retry time: {max_retry_time*1000:.0f}ms")
+            
+            if max_retry_time < 0.2:
+                logging.info(f"   ✅ All retries under 200ms threshold")
+            else:
+                logging.warning(f"   ⚠️ Some retries exceeded 200ms threshold")
         
         # Статистика fallback
         if stats['fallback_invocations'] > 0:
