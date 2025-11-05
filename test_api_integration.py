@@ -202,7 +202,7 @@ def run_all_tests():
         print("   ✅ ID tracking функционирует")
         print("   ✅ Фильтрация отключена")
         print()
-        print("🚀 Можно запускать в продакшен: python main.py --api")
+        print("🚀 Можно запускать в продакшен: python main.py")
         
     except AssertionError as e:
         print("\n" + "=" * 60)
