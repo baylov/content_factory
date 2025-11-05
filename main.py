@@ -33,12 +33,20 @@ logging.basicConfig(
     ]
 )
 
-# Global tracking for fallback invocations
+# Global tracking for fallback invocations and strategy statistics
 _last_parse_stats = {
     'fallback_invoked': False,
     'filter_stats': {},
     'total_raw_links': 0,
-    'total_filtered_links': 0
+    'total_filtered_links': 0,
+    'strategy_stats': {
+        'strategy_used': None,
+        'exact_id_attempts': 0,
+        'exact_id_retry_time': 0.0,
+        'exact_id_success': False,
+        'fallback_reason': None,
+        'dom_state_at_fallback': None
+    }
 }
 
 
@@ -408,6 +416,127 @@ def check_readiness_probe(driver):
     """)
 
 
+def check_dom_state_for_fallback(driver):
+    """
+    Checks broader selectors to determine if content exists but exact_id selector failed.
+    
+    Returns dict with:
+        - broader_content_exists: bool - if any broader selector found links
+        - exact_id_count: int - count for exact_id selector
+        - all_notice_count: int - count for all_notice selector
+        - tr_notice_count: int - count for tr_notice selector
+        - any_id_count: int - count for any_id selector
+        - readyState: str - document.readyState
+        - containerVisible: bool - whether notice container is visible
+    """
+    return driver.execute_script("""
+        const result = {
+            broader_content_exists: false,
+            exact_id_count: 0,
+            all_notice_count: 0,
+            tr_notice_count: 0,
+            any_id_count: 0,
+            readyState: document.readyState,
+            containerVisible: false
+        };
+        
+        // Check container visibility
+        const containers = document.querySelectorAll('table, .notice-list, [class*="notice"], tbody');
+        result.containerVisible = containers.length > 0;
+        
+        // Count for each strategy
+        result.exact_id_count = document.querySelectorAll('a[href*="/service_center/notice?id="]').length;
+        result.all_notice_count = document.querySelectorAll('a[href*="/service_center/notice"]').length;
+        result.tr_notice_count = document.querySelectorAll('tr a[href*="notice"]').length;
+        result.any_id_count = document.querySelectorAll('a[href*="id="]').length;
+        
+        // Broader content exists if any non-exact_id selector found links
+        result.broader_content_exists = (
+            result.all_notice_count > 0 || 
+            result.tr_notice_count > 0 || 
+            result.any_id_count > 0
+        );
+        
+        return result;
+    """)
+
+
+def retry_exact_id_selector(driver, max_retries=5, retry_interval=0.04, max_total_time=0.2):
+    """
+    Retries the exact_id selector before falling back to broader strategies.
+    
+    Args:
+        driver: Selenium WebDriver instance
+        max_retries: Maximum number of retry attempts (default: 5)
+        retry_interval: Time between retries in seconds (default: 0.04 = 40ms)
+        max_total_time: Maximum total time for all retries (default: 0.2s)
+    
+    Returns:
+        dict with:
+            - success: bool - whether exact_id selector found links
+            - count: int - number of links found
+            - attempts: int - number of attempts made
+            - elapsed_time: float - total time spent
+            - dom_state: dict - DOM state at final attempt
+    """
+    start_time = time.time()
+    attempts = 0
+    
+    for attempt in range(1, max_retries + 1):
+        attempts = attempt
+        
+        # Check if we've exceeded max total time
+        elapsed = time.time() - start_time
+        if elapsed >= max_total_time:
+            break
+        
+        # Try exact_id selector with DOM state check
+        result = driver.execute_script("""
+            const exactIdLinks = document.querySelectorAll('a[href*="/service_center/notice?id="]');
+            const allNoticeLinks = document.querySelectorAll('a[href*="/service_center/notice"]');
+            
+            return {
+                exact_id_count: exactIdLinks.length,
+                all_notice_count: allNoticeLinks.length,
+                readyState: document.readyState,
+                containerVisible: document.querySelectorAll('table, .notice-list, [class*="notice"], tbody').length > 0
+            };
+        """)
+        
+        if result['exact_id_count'] > 0:
+            # Success!
+            elapsed_time = time.time() - start_time
+            return {
+                'success': True,
+                'count': result['exact_id_count'],
+                'attempts': attempts,
+                'elapsed_time': elapsed_time,
+                'dom_state': result
+            }
+        
+        # Sleep before next attempt (but not after last attempt)
+        if attempt < max_retries:
+            remaining_time = max_total_time - (time.time() - start_time)
+            if remaining_time > retry_interval:
+                time.sleep(retry_interval)
+            elif remaining_time > 0:
+                time.sleep(remaining_time)
+            else:
+                break
+    
+    # Failed - get final DOM state
+    elapsed_time = time.time() - start_time
+    final_state = check_dom_state_for_fallback(driver)
+    
+    return {
+        'success': False,
+        'count': 0,
+        'attempts': attempts,
+        'elapsed_time': elapsed_time,
+        'dom_state': final_state
+    }
+
+
 def wait_for_notices_js(driver, max_wait=0.3):
     """
     Ждет появления новостей, проверяя каждые 20ms.
@@ -535,13 +664,59 @@ def get_all_notice_ids(driver, min_expected_count=20):
     """
     
     try:
-        # === СТРАТЕГИЯ 1: Точный селектор (как в диагностике) ===
-        links = driver.execute_script(js_extract_metadata, 'a[href*="/service_center/notice?id="]')
+        # Initialize tracking variables
+        fallback_reason = None
         
-        strategy = 'exact_id'
-        total_links = len(links)
+        # === СТРАТЕГИЯ 1: Точный селектор с retry loop ===
+        logging.info("🔍 Strategy 1 (exact_id): Starting with retry loop...")
         
-        logging.info(f"🔍 Strategy 1 (exact_id): {total_links} links")
+        # Retry exact_id selector before fallback
+        retry_result = retry_exact_id_selector(driver, max_retries=5, retry_interval=0.04, max_total_time=0.2)
+        
+        # Log instrumentation data
+        logging.info(
+            f"📊 Strategy 1 instrumentation: "
+            f"attempts={retry_result['attempts']}, "
+            f"time={retry_result['elapsed_time']*1000:.0f}ms, "
+            f"success={retry_result['success']}"
+        )
+        
+        if retry_result['success']:
+            # Strategy 1 succeeded!
+            links = driver.execute_script(js_extract_metadata, 'a[href*="/service_center/notice?id="]')
+            strategy = 'exact_id'
+            total_links = len(links)
+            
+            logging.info(
+                f"✅ Strategy 1 (exact_id): {total_links} links "
+                f"(found after {retry_result['attempts']} attempt(s), "
+                f"{retry_result['elapsed_time']*1000:.0f}ms)"
+            )
+        else:
+            # Strategy 1 failed after retries - check DOM state
+            dom_state = retry_result['dom_state']
+            
+            # Determine fallback reason
+            if dom_state.get('broader_content_exists', False):
+                fallback_reason = 'exact_id_failed_but_broader_content_exists'
+                logging.warning(
+                    f"⚠️ Strategy 1 failed after {retry_result['attempts']} attempts "
+                    f"({retry_result['elapsed_time']*1000:.0f}ms) "
+                    f"BUT broader selectors see content:"
+                )
+                logging.warning(f"   • all_notice: {dom_state.get('all_notice_count', 0)} links")
+                logging.warning(f"   • tr_notice: {dom_state.get('tr_notice_count', 0)} links")
+                logging.warning(f"   • any_id: {dom_state.get('any_id_count', 0)} links")
+                logging.warning(f"   • DOM: readyState={dom_state.get('readyState', 'unknown')}, "
+                              f"container={dom_state.get('containerVisible', False)}")
+            else:
+                fallback_reason = 'no_content_detected'
+                logging.info(
+                    f"ℹ️ Strategy 1 failed and no broader content detected - "
+                    f"page may still be loading"
+                )
+            
+            links = []
         
         # === СТРАТЕГИЯ 2: Все notice ссылки (fallback) ===
         if len(links) == 0:
@@ -681,7 +856,15 @@ def get_all_notice_ids(driver, min_expected_count=20):
             'fallback_invoked': fallback_invoked,
             'filter_stats': filter_stats,
             'total_raw_links': len(all_notices),
-            'total_filtered_links': len(filtered_notices)
+            'total_filtered_links': len(filtered_notices),
+            'strategy_stats': {
+                'strategy_used': strategy,
+                'exact_id_attempts': retry_result['attempts'],
+                'exact_id_retry_time': retry_result['elapsed_time'],
+                'exact_id_success': retry_result['success'],
+                'fallback_reason': fallback_reason if not retry_result['success'] else None,
+                'dom_state_at_fallback': retry_result['dom_state'] if not retry_result['success'] else None
+            }
         }
         
         parse_time = time.time() - parse_start
