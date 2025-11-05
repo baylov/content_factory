@@ -8,6 +8,7 @@ import random
 import math
 import json
 from logging.handlers import RotatingFileHandler
+from typing import Dict, List, Tuple, Optional
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -28,12 +29,24 @@ from config import (
     API_ERROR_THRESHOLD_ENV,
     API_IDLE_BASE_RANGE,
     API_IDLE_JITTER_RANGE,
+    API_RECOVERY_OK_ENV,
+    API_SLEEP_MS_ENV,
     DEFAULT_API_ERROR_THRESHOLD,
+    DEFAULT_API_RECOVERY_OK,
+    DEFAULT_API_SLEEP_MS,
+    DEFAULT_HTML_REFRESH_MS,
+    DEFAULT_JITTER_MS,
     DEFAULT_MODE,
     ENV_MODE_VAR,
+    HTML_REFRESH_MS_ENV,
+    JITTER_MS_ENV,
+    NO_AUTOFALLBACK_ENV,
     SUMMARY_INTERVAL_SECONDS,
     VALID_MODES,
     get_api_error_threshold,
+    get_api_recovery_ok,
+    get_sleep_ranges,
+    is_autofallback_disabled,
     parse_cli_args,
     resolve_mode,
 )
@@ -150,6 +163,325 @@ Error: {error_message}
 
 # Создаем глобальный экземпляр MetricsLogger
 metrics_logger = MetricsLogger()
+
+
+class FailureDetector:
+    """
+    Tracks consecutive API failures and manages auto-fallback logic.
+    
+    Features:
+    - Rolling window of failure timestamps (2-minute window)
+    - Configurable failure and recovery thresholds
+    - Detailed error tracking and summaries
+    """
+    
+    def __init__(self, failure_threshold=5, recovery_threshold=20, window_seconds=120):
+        self.failure_threshold = failure_threshold
+        self.recovery_threshold = recovery_threshold
+        self.window_seconds = window_seconds
+        
+        self.failure_timestamps = []  # List of (timestamp, error_message) tuples
+        self.consecutive_successes = 0
+        self.last_failure_summary = []
+        self.total_failures = 0
+        self.total_successes = 0
+        
+    def record_api_result(self, success: bool, error_message: str = None, timestamp: float = None):
+        """Record an API call result and update state."""
+        if timestamp is None:
+            timestamp = time.time()
+            
+        # Clean old failures outside the window
+        self._cleanup_old_failures(timestamp)
+        
+        if success:
+            self.consecutive_successes += 1
+            self.total_successes += 1
+            return False, None  # No fallback triggered
+        else:
+            self.failure_timestamps.append((timestamp, error_message or "unknown"))
+            self.consecutive_successes = 0
+            self.total_failures += 1
+            
+            # Check if we should trigger fallback
+            recent_failures = len(self.failure_timestamps)
+            if recent_failures >= self.failure_threshold:
+                self.last_failure_summary = [
+                    f"  • {msg} at {datetime.fromtimestamp(ts).strftime('%H:%M:%S')}"
+                    for ts, msg in self.failure_timestamps[-5:]  # Show last 5 errors
+                ]
+                return True, recent_failures
+                
+        return False, None
+    
+    def check_recovery_ready(self) -> bool:
+        """Check if API is healthy enough to switch back."""
+        return self.consecutive_successes >= self.recovery_threshold
+    
+    def _cleanup_old_failures(self, current_time: float):
+        """Remove failures outside the rolling window."""
+        cutoff_time = current_time - self.window_seconds
+        self.failure_timestamps = [
+            (ts, msg) for ts, msg in self.failure_timestamps 
+            if ts >= cutoff_time
+        ]
+    
+    def get_stats(self) -> dict:
+        """Get current detector statistics."""
+        return {
+            "recent_failures": len(self.failure_timestamps),
+            "consecutive_successes": self.consecutive_successes,
+            "total_failures": self.total_failures,
+            "total_successes": self.total_successes,
+            "failure_rate": self.total_failures / max(1, self.total_failures + self.total_successes),
+            "in_failure_state": len(self.failure_timestamps) >= self.failure_threshold,
+            "ready_for_recovery": self.check_recovery_ready()
+        }
+    
+    def reset(self):
+        """Reset detector state (used when switching modes)."""
+        self.failure_timestamps.clear()
+        self.consecutive_successes = 0
+        self.last_failure_summary.clear()
+
+
+class ModeManager:
+    """
+    Manages mode switching between API and HTML with proper resource handling.
+    """
+    
+    def __init__(self, initial_mode: str, autofallback_enabled: bool = True):
+        self.current_mode = initial_mode
+        self.autofallback_enabled = autofallback_enabled
+        self.api_session = None
+        self.html_driver = None
+        self.last_transition_time = time.time()
+        self.transition_count = 0
+        self.mode_history = []  # List of (timestamp, mode, reason) tuples
+        
+    def initialize_api_session(self):
+        """Initialize API session if not already active."""
+        if self.api_session is None:
+            self.api_session = create_api_session()
+            logging.info("✅ API session initialized")
+            
+    def initialize_html_driver(self):
+        """Initialize HTML driver if not already active."""
+        if self.html_driver is None:
+            self.html_driver = init_driver()
+            if self.html_driver:
+                logging.info("✅ HTML driver initialized")
+            else:
+                logging.error("❌ Failed to initialize HTML driver")
+                return False
+        return True
+    
+    def switch_to_html(self, reason: str, failure_count: int):
+        """Switch from API to HTML mode."""
+        if self.current_mode == "html":
+            return False
+            
+        if not self.autofallback_enabled:
+            logging.info("🔒 Auto-fallback disabled - staying in API mode")
+            return False
+            
+        # Cleanup API resources
+        if self.api_session:
+            try:
+                self.api_session.close()
+                self.api_session = None
+                logging.info("🧹 API session closed")
+            except Exception as e:
+                logging.warning(f"⚠️ Error closing API session: {e}")
+        
+        # Initialize HTML resources
+        if not self.initialize_html_driver():
+            logging.error("❌ Cannot switch to HTML mode - driver initialization failed")
+            return False
+            
+        old_mode = self.current_mode
+        self.current_mode = "html"
+        self.last_transition_time = time.time()
+        self.transition_count += 1
+        
+        # Record transition
+        self.mode_history.append((time.time(), "html", reason))
+        
+        logging.warning(f"🔄 MODE SWITCH: {old_mode.upper()} → HTML")
+        logging.warning(f"   Reason: {reason}")
+        logging.warning(f"   Failure count: {failure_count}")
+        logging.warning(f"   Transition #{self.transition_count}")
+        
+        return True
+    
+    def switch_to_api(self, reason: str):
+        """Switch from HTML to API mode."""
+        if self.current_mode == "api":
+            return False
+            
+        if not self.autofallback_enabled:
+            logging.info("🔒 Auto-fallback disabled - staying in HTML mode")
+            return False
+            
+        # Cleanup HTML resources
+        if self.html_driver:
+            try:
+                self.html_driver.quit()
+                self.html_driver = None
+                logging.info("🧹 HTML driver closed")
+            except Exception as e:
+                logging.warning(f"⚠️ Error closing HTML driver: {e}")
+        
+        # Initialize API resources
+        self.initialize_api_session()
+        
+        old_mode = self.current_mode
+        self.current_mode = "api"
+        self.last_transition_time = time.time()
+        self.transition_count += 1
+        
+        # Record transition
+        self.mode_history.append((time.time(), "api", reason))
+        
+        logging.info(f"🔄 MODE SWITCH: {old_mode.upper()} → API")
+        logging.info(f"   Reason: {reason}")
+        logging.info(f"   Transition #{self.transition_count}")
+        
+        return True
+    
+    def get_mode_stats(self) -> dict:
+        """Get current mode statistics."""
+        return {
+            "current_mode": self.current_mode,
+            "autofallback_enabled": self.autofallback_enabled,
+            "transition_count": self.transition_count,
+            "last_transition_seconds_ago": time.time() - self.last_transition_time,
+            "api_session_active": self.api_session is not None,
+            "html_driver_active": self.html_driver is not None,
+            "recent_transitions": len([
+                ts for ts, _, _ in self.mode_history 
+                if time.time() - ts < 300  # Last 5 minutes
+            ])
+        }
+    
+    def cleanup(self):
+        """Clean up all resources."""
+        if self.api_session:
+            try:
+                self.api_session.close()
+                logging.info("🧹 API session closed during cleanup")
+            except Exception as e:
+                logging.warning(f"⚠️ Error closing API session during cleanup: {e}")
+        
+        if self.html_driver:
+            try:
+                self.html_driver.quit()
+                logging.info("🧹 HTML driver closed during cleanup")
+            except Exception as e:
+                logging.warning(f"⚠️ Error closing HTML driver during cleanup: {e}")
+
+
+class HybridTelemetry:
+    """Enhanced telemetry for hybrid API/HTML mode."""
+    
+    def __init__(self, summary_interval=60):
+        self.summary_interval = summary_interval
+        self.last_summary_time = time.monotonic()
+        self.reset()
+    
+    def reset(self):
+        self.cycle_durations = []
+        self.api_latencies = []
+        self.html_latencies = []
+        self.error_count = 0
+        self.cycle_count = 0
+        self.mode_durations = {"api": [], "html": []}
+        self.last_known_id = None
+        self.max_id = None
+    
+    def record_cycle(self, cycle_duration, mode="unknown", api_latency=None, html_latency=None, error_occurred=False, last_known_id=None, max_id=None):
+        self.cycle_durations.append(cycle_duration)
+        self.mode_durations[mode].append(cycle_duration)
+        
+        if api_latency is not None:
+            self.api_latencies.append(api_latency)
+        if html_latency is not None:
+            self.html_latencies.append(html_latency)
+            
+        if error_occurred:
+            self.error_count += 1
+            
+        self.cycle_count += 1
+        self.last_known_id = last_known_id
+        self.max_id = max_id
+    
+    def maybe_log_summary(self, mode_manager: ModeManager, failure_detector: FailureDetector):
+        now = time.monotonic()
+        if now - self.last_summary_time < self.summary_interval or self.cycle_count == 0:
+            return
+        
+        # Calculate statistics
+        avg_cycle = sum(self.cycle_durations) / len(self.cycle_durations)
+        p95_cycle = self._percentile(self.cycle_durations, 95)
+        error_rate = self.error_count / self.cycle_count if self.cycle_count else 0
+        
+        # Mode-specific stats
+        api_cycles = len(self.mode_durations.get("api", []))
+        html_cycles = len(self.mode_durations.get("html", []))
+        
+        api_avg = sum(self.mode_durations.get("api", [])) / api_cycles if api_cycles > 0 else None
+        html_avg = sum(self.mode_durations.get("html", [])) / html_cycles if html_cycles > 0 else None
+        
+        api_latency_avg = (
+            sum(self.api_latencies) / len(self.api_latencies)
+            if self.api_latencies else None
+        )
+        
+        # Get mode and failure detector stats
+        mode_stats = mode_manager.get_mode_stats()
+        failure_stats = failure_detector.get_stats()
+        
+        # Format strings
+        api_avg_str = f"{api_avg:.3f}s" if api_avg else "n/a"
+        html_avg_str = f"{html_avg:.3f}s" if html_avg else "n/a"
+        api_latency_str = f"{api_latency_avg:.3f}s" if api_latency_avg else "n/a"
+        p95_str = f"{p95_cycle:.3f}s" if p95_cycle else "n/a"
+        
+        logging.info(
+            "📈 60s summary: mode=%s, cycles=%d, avg_cycle=%.3fs, p95_cycle=%s, error_rate=%.2f%%, "
+            "api_cycles=%d(%s), html_cycles=%d(%s), api_latency=%s, failures=%d, transitions=%d",
+            mode_stats["current_mode"].upper(),
+            self.cycle_count,
+            avg_cycle,
+            p95_str,
+            error_rate * 100,
+            api_cycles,
+            api_avg_str,
+            html_cycles,
+            html_avg_str,
+            api_latency_str,
+            failure_stats["recent_failures"],
+            mode_stats["transition_count"]
+        )
+        
+        if self.last_known_id is not None and self.max_id is not None:
+            logging.info(
+                "   📊 ID tracking: last_known=%s, max=%s, gap=%d",
+                self.last_known_id,
+                self.max_id,
+                max(0, self.max_id - self.last_known_id) if self.last_known_id and self.max_id else 0
+            )
+        
+        self.reset()
+        self.last_summary_time = now
+    
+    @staticmethod
+    def _percentile(values, percentile):
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = max(0, min(len(ordered) - 1, math.ceil(percentile / 100 * len(ordered)) - 1))
+        return ordered[index]
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -2010,115 +2342,253 @@ class ApiLoopTelemetry:
         self.last_summary_time = now
 
 
-def main_api(
+def main_hybrid(
     mode_selection=None,
     summary_interval=60,
-    idle_base_range=(0.1, 0.3),
-    idle_jitter_range=(0.02, 0.04),
-    fallback_threshold=5,
 ):
-    """Основной цикл API режима."""
+    """Hybrid main loop with auto-fallback between API and HTML modes."""
     timezone = ZoneInfo("Asia/Seoul")
-    base_min_ms = int(idle_base_range[0] * 1000)
-    base_max_ms = int(idle_base_range[1] * 1000)
-    jitter_min_ms = int(idle_jitter_range[0] * 1000)
-    jitter_max_ms = int(idle_jitter_range[1] * 1000)
-    fallback_threshold = max(1, int(fallback_threshold))
-
-    logging.info("🚀 Upbit Notice Bot запущен (API MODE)")
+    
+    # Get configuration values
+    api_error_threshold, _ = get_api_error_threshold()
+    api_recovery_threshold, _ = get_api_recovery_ok()
+    api_sleep_range, html_refresh_range, jitter_range, api_raw, html_raw, jitter_raw = get_sleep_ranges()
+    autofallback_disabled = is_autofallback_disabled()
+    
+    # Convert ms ranges to seconds for internal use
+    api_sleep_range_sec = (api_sleep_range[0] / 1000.0, api_sleep_range[1] / 1000.0)
+    html_refresh_range_sec = (html_refresh_range[0] / 1000.0, html_refresh_range[1] / 1000.0)
+    jitter_range_sec = (jitter_range[0] / 1000.0, jitter_range[1] / 1000.0)
+    
+    # Initialize components
+    initial_mode = mode_selection.mode if mode_selection else DEFAULT_MODE
+    mode_manager = ModeManager(initial_mode, not autofallback_disabled)
+    failure_detector = FailureDetector(api_error_threshold, api_recovery_threshold)
+    telemetry = HybridTelemetry(summary_interval=summary_interval)
+    
+    # Initialize resources for initial mode
+    if initial_mode == "api":
+        mode_manager.initialize_api_session()
+    else:
+        if not mode_manager.initialize_html_driver():
+            logging.error("❌ Failed to initialize HTML driver, exiting")
+            return
+    
+    # Log startup information
+    logging.info("🚀 Upbit Notice Bot запущен (HYBRID MODE)")
     if mode_selection:
         resolution_trace = " → ".join(mode_selection.resolution_path)
         logging.info(f"🧭 Mode resolution: {resolution_trace}")
-    logging.info("📡 Режим: ПРЯМОЙ API")
-    logging.info("   • Endpoint: https://api-manager.upbit.com/api/v1/announcements")
+    
+    logging.info("📡 Режим: ГИБРИДНЫЙ (API + HTML с авто-фоллбэком)")
+    logging.info("   • Initial mode: %s", initial_mode.upper())
+    logging.info("   • Auto-fallback: %s", "DISABLED" if autofallback_disabled else "ENABLED")
     logging.info("   • Timezone: Asia/Seoul")
-    logging.info(
-        "   • Target cycle: %d-%dms + jitter %d-%dms",
-        base_min_ms,
-        base_max_ms,
-        jitter_min_ms,
-        jitter_max_ms,
-    )
-    logging.info("   • Summary interval: %ds", summary_interval)
     logging.info("   • ID tracking file: %s", LAST_NOTICE_FILE)
     logging.info("")
+    
+    logging.info("⚙️ API Configuration:")
+    logging.info("   • Endpoint: https://api-manager.upbit.com/api/v1/announcements")
+    logging.info("   • Sleep cycle: %d-%dms + jitter %d-%dms", 
+                 api_sleep_range[0], api_sleep_range[1], jitter_range[0], jitter_range[1])
+    logging.info("   • Failure threshold: %d errors", api_error_threshold)
+    logging.info("   • Recovery threshold: %d successes", api_recovery_threshold)
+    if api_raw:
+        logging.info("   • API sleep override: %sms", api_raw)
+    
+    logging.info("")
+    logging.info("⚙️ HTML Configuration:")
+    logging.info("   • Refresh cycle: %d-%dms + jitter %d-%dms",
+                 html_refresh_range[0], html_refresh_range[1], jitter_range[0], jitter_range[1])
+    if html_raw:
+        logging.info("   • HTML refresh override: %sms", html_raw)
+    
+    if jitter_raw:
+        logging.info("   • Jitter override: %sms", jitter_raw)
+    
+    logging.info("")
     logging.info('🛡️ HTTP session: retry total=3, backoff=0.3, status codes=[429, 500, 502, 503, 504]')
-    logging.info("⚠️ Fallback warning threshold: %d consecutive error cycles", fallback_threshold)
     logging.info("")
-
-    session = create_api_session()
-    logging.info("✅ HTTP session создана с retry механизмом")
-    logging.info("")
-
-    telemetry = ApiLoopTelemetry(summary_interval=summary_interval)
+    
     cycle = 0
-    consecutive_errors = 0
-    warning_issued = False
-
+    
     try:
         while True:
             cycle += 1
+            cycle_start = time.perf_counter()
+            current_kst = datetime.now(timezone)
+            timestamp_str = current_kst.strftime('%H:%M:%S.%f')[:-3]
+            
+            # Variables for this cycle
+            notices = []
+            error_occurred = False
+            error_message = None
+            api_latency = None
+            html_latency = None
+            last_known_id = None
+            max_id = None
+            new_ids = []
+            
             try:
-                cycle_start = time.perf_counter()
+                if mode_manager.current_mode == "api":
+                    # API MODE
+                    notices, metadata = get_notices_via_api(mode_manager.api_session, return_metadata=True)
+                    api_latency = metadata.get("latency")
+                    error_message = metadata.get("error")
+                    status = metadata.get("status", "unknown")
+                    
+                    error_occurred = bool(error_message) or status == "error"
+                    
+                    # Process notices if successful
+                    if not error_occurred and notices:
+                        metrics = process_new_notices(notices, mode_manager.api_session)
+                        last_known_id = metrics.get("last_known_id")
+                        max_id = metrics.get("max_id")
+                        new_ids = metrics.get("new_ids") or []
+                    
+                    # Record API result for failure detection
+                    should_fallback, failure_count = failure_detector.record_api_result(
+                        not error_occurred, error_message, time.time()
+                    )
+                    
+                    # Check if we should switch to HTML
+                    if should_fallback:
+                        reason = f"API failures: {failure_count} in {failure_detector.window_seconds}s"
+                        if failure_detector.last_failure_summary:
+                            reason += "\nRecent errors:\n" + "\n".join(failure_detector.last_failure_summary)
+                        
+                        if mode_manager.switch_to_html(reason, failure_count):
+                            failure_detector.reset()  # Reset failure detector after switch
+                            # Continue with HTML mode in this cycle
+                            mode_manager.current_mode = "html"
+                        else:
+                            logging.warning("⚠️ Failed to switch to HTML mode, continuing with API")
+                
+                if mode_manager.current_mode == "html":
+                    # HTML MODE
+                    if not mode_manager.html_driver:
+                        if not mode_manager.initialize_html_driver():
+                            logging.error("❌ HTML driver not available, cannot continue")
+                            break
+                    
+                    # Get notices via HTML
+                    html_start = time.perf_counter()
+                    all_ids, method, timings = get_all_notice_ids_with_api(
+                        mode_manager.html_driver, known_endpoints=[], use_cdp=False
+                    )
+                    html_latency = time.perf_counter() - html_start
+                    
+                    if all_ids:
+                        # Convert to notice-like format for processing
+                        max_id = max(all_ids)
+                        last_known_id = get_last_max_id()
+                        
+                        if last_known_id is None:
+                            save_max_id(max_id)
+                            last_known_id = max_id
+                            logging.info(f"📊 HTML mode: First run, saved max_id={max_id}")
+                        else:
+                            # Find new IDs
+                            new_ids = [nid for nid in all_ids if nid > last_known_id]
+                            new_ids.sort()
+                            
+                            if new_ids:
+                                logging.info(f"🔔 HTML mode: {len(new_ids)} новых новостей → ID: {new_ids}")
+                                
+                                # Send notifications (simulated for HTML mode)
+                                for notice_id in new_ids:
+                                    message = f"""🆕 <b>Новая новость Upbit!</b>
 
-                notices, metadata = get_notices_via_api(session, return_metadata=True)
-                api_latency = metadata.get("latency")
-                error_message = metadata.get("error")
-                status = metadata.get("status", "unknown")
+📌 <b>ID:</b> {notice_id}
+📰 <b>Обнаружено через HTML режим</b>
 
-                current_kst = datetime.now(timezone)
-                timestamp_str = current_kst.strftime('%H:%M:%S.%f')[:-3]
+🕐 Обнаружено: {current_kst.strftime('%H:%M:%S')} KST
 
-                metrics = process_new_notices(notices, session)
+🔗 https://upbit.com/service_center/notice?id={notice_id}"""
+                                    
+                                    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
+                                        api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+                                        data = {
+                                            "chat_id": TELEGRAM_CHAT_ID,
+                                            "text": message,
+                                            "parse_mode": "HTML"
+                                        }
+                                        
+                                        try:
+                                            response = mode_manager.html_driver.execute_script(f"""
+                                                return fetch('{api_url}', {{
+                                                    method: 'POST',
+                                                    headers: {{'Content-Type': 'application/json'}},
+                                                    body: JSON.stringify({data})
+                                                }}).then(r => r.json());
+                                            """)
+                                            if response.get('ok'):
+                                                logging.info(f"✅ Уведомление отправлено (ID: {notice_id})")
+                                            else:
+                                                logging.error(f"❌ Ошибка отправки в Telegram: {response}")
+                                        except Exception as e:
+                                            logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+                                
+                                save_max_id(max_id)
+                                last_known_id = max_id
+                    
+                    # In HTML mode, we simulate API success for recovery detection
+                    # after some time of successful HTML operation
+                    if failure_detector.get_stats()["in_failure_state"]:
+                        # Simulate success to allow recovery back to API
+                        failure_detector.record_api_result(True, None, time.time())
+                        
+                        # Check if ready to recover to API
+                        if failure_detector.check_recovery_ready():
+                            reason = f"API recovered after {api_recovery_threshold} successful checks"
+                            if mode_manager.switch_to_api(reason):
+                                failure_detector.reset()
+                
+                # Record cycle metrics
                 cycle_duration = time.perf_counter() - cycle_start
-
-                error_occurred = bool(error_message) or status == "error"
-                telemetry.record_cycle(cycle_duration, api_latency, error_occurred)
-
+                telemetry.record_cycle(
+                    cycle_duration=cycle_duration,
+                    mode=mode_manager.current_mode,
+                    api_latency=api_latency,
+                    html_latency=html_latency,
+                    error_occurred=error_occurred,
+                    last_known_id=last_known_id,
+                    max_id=max_id
+                )
+                
+                # Log cycle information
                 latency_str = f"{api_latency:.3f}s" if api_latency is not None else "n/a"
-                total_notices = metrics.get("total_notices", 0)
-                max_id = metrics.get("max_id")
-                last_known_id = metrics.get("last_known_id")
-                updated_last_id = metrics.get("updated_last_id")
-                new_ids = metrics.get("new_ids") or []
+                html_latency_str = f"{html_latency:.3f}s" if html_latency is not None else "n/a"
+                total_notices = len(notices) if notices else (len(new_ids) if new_ids else 0)
                 new_ids_display = new_ids if new_ids else "-"
-
+                
                 logging.info(
-                    "🔄 Cycle #%d | ts_kst=%s | status=%s | cycle=%.3fs | api=%s | notices=%d | max_id=%s | last_known=%s | new_ids=%s",
+                    "🔄 Cycle #%d | ts_kst=%s | mode=%s | status=%s | cycle=%.3fs | api=%s | html=%s | notices=%d | max_id=%s | last_known=%s | new_ids=%s",
                     cycle,
                     timestamp_str,
+                    mode_manager.current_mode.upper(),
                     "error" if error_occurred else "ok",
                     cycle_duration,
                     latency_str,
+                    html_latency_str,
                     total_notices,
                     max_id if max_id is not None else "-",
                     last_known_id if last_known_id is not None else "-",
                     new_ids_display,
                 )
-
-                if updated_last_id is not None and updated_last_id != last_known_id:
-                    logging.debug("🗂️ last_notice.txt обновлён до %s", updated_last_id)
-
-                if error_occurred:
-                    consecutive_errors += 1
+                
+                # Log telemetry summary
+                telemetry.maybe_log_summary(mode_manager, failure_detector)
+                
+                # Sleep with jitter based on current mode
+                if mode_manager.current_mode == "api":
+                    base_sleep = random.uniform(*api_sleep_range_sec)
                 else:
-                    if consecutive_errors and warning_issued:
-                        logging.info("✅ API восстановлен после %d ошибок", consecutive_errors)
-                    consecutive_errors = 0
-                    warning_issued = False
-
-                if error_occurred and consecutive_errors >= fallback_threshold and not warning_issued:
-                    logging.warning(
-                        "🚨 API errors detected for %d consecutive cycles. Switch to HTML mode with '--html' or set UPBIT_MODE=html if issues persist.",
-                        consecutive_errors,
-                    )
-                    warning_issued = True
-
-                telemetry.maybe_log_summary()
-
-                base_sleep = random.uniform(*idle_base_range)
-                jitter = random.uniform(*idle_jitter_range)
+                    base_sleep = random.uniform(*html_refresh_range_sec)
+                
+                jitter = random.uniform(*jitter_range_sec)
                 sleep_time = max(0.0, base_sleep + jitter)
+                
                 logging.debug(
                     "💤 Сон %.0fms (base %.0fms + jitter %.0fms)",
                     sleep_time * 1000,
@@ -2126,13 +2596,28 @@ def main_api(
                     jitter * 1000,
                 )
                 time.sleep(sleep_time)
+                
             except Exception as cycle_error:
                 logging.error("❌ Неожиданная ошибка в цикле #%d: %s", cycle, cycle_error)
                 logging.debug("Traceback:", exc_info=True)
-                telemetry.maybe_log_summary()
+                
+                # Record error in telemetry
+                cycle_duration = time.perf_counter() - cycle_start
+                telemetry.record_cycle(
+                    cycle_duration=cycle_duration,
+                    mode=mode_manager.current_mode,
+                    error_occurred=True
+                )
+                
+                telemetry.maybe_log_summary(mode_manager, failure_detector)
                 time.sleep(1)
+    
     except KeyboardInterrupt:
         logging.info("⏹️ Остановка (Ctrl+C)")
+    finally:
+        # Cleanup resources
+        mode_manager.cleanup()
+        logging.info("✅ Все ресурсы очищены")
 
 
 def main():
@@ -2504,7 +2989,13 @@ if __name__ == "__main__":
 
     logging.info("   Default fallback: %s", DEFAULT_MODE)
 
+    # Get all configuration values
     api_error_threshold, raw_threshold = get_api_error_threshold()
+    api_recovery_threshold, raw_recovery = get_api_recovery_ok()
+    api_sleep_range, html_refresh_range, jitter_range, api_raw, html_raw, jitter_raw = get_sleep_ranges()
+    autofallback_disabled = is_autofallback_disabled()
+    
+    # Log API error threshold
     if raw_threshold is not None:
         try:
             parsed_raw = int(raw_threshold)
@@ -2529,16 +3020,59 @@ if __name__ == "__main__":
             "   API error warning threshold: %d (default)",
             api_error_threshold,
         )
+    
+    # Log API recovery threshold
+    if raw_recovery is not None:
+        try:
+            parsed_recovery = int(raw_recovery)
+        except ValueError:
+            parsed_recovery = None
+        if parsed_recovery is None or parsed_recovery < 1:
+            logging.warning(
+                "⚠️ Invalid %s=%s. Using default value %d.",
+                API_RECOVERY_OK_ENV,
+                raw_recovery,
+                DEFAULT_API_RECOVERY_OK,
+            )
+            api_recovery_threshold = DEFAULT_API_RECOVERY_OK
+        else:
+            logging.info(
+                "   API recovery threshold: %d (from %s)",
+                api_recovery_threshold,
+                API_RECOVERY_OK_ENV,
+            )
+    else:
+        logging.info(
+            "   API recovery threshold: %d (default)",
+            api_recovery_threshold,
+        )
+    
+    # Log sleep ranges
+    logging.info("   API sleep range: %d-%dms %s", 
+                 api_sleep_range[0], api_sleep_range[1], 
+                 f"(override: {api_raw})" if api_raw else "(default)")
+    logging.info("   HTML refresh range: %d-%dms %s", 
+                 html_refresh_range[0], html_refresh_range[1],
+                 f"(override: {html_raw})" if html_raw else "(default)")
+    logging.info("   Jitter range: %d-%dms %s",
+                 jitter_range[0], jitter_range[1],
+                 f"(override: {jitter_raw})" if jitter_raw else "(default)")
+    
+    # Log auto-fallback status
+    if autofallback_disabled:
+        logging.info("   Auto-fallback: DISABLED (via --no-autofallback or %s)", NO_AUTOFALLBACK_ENV)
+    else:
+        logging.info("   Auto-fallback: ENABLED")
 
-    if mode_selection.mode == "api":
-        main_api(
+    # Use hybrid mode for all cases except forced HTML mode
+    if mode_selection.mode == "html" and getattr(args, 'html', False) or getattr(args, 'legacy', False):
+        # Forced HTML mode - use legacy main function
+        logging.info("📡 Режим: legacy HTML (forced via CLI)")
+        logging.info("   Для гибридного режима запустите без флагов или используйте --api")
+        main()
+    else:
+        # Use hybrid mode with auto-fallback
+        main_hybrid(
             mode_selection=mode_selection,
             summary_interval=SUMMARY_INTERVAL_SECONDS,
-            idle_base_range=API_IDLE_BASE_RANGE,
-            idle_jitter_range=API_IDLE_JITTER_RANGE,
-            fallback_threshold=api_error_threshold,
         )
-    else:
-        logging.info("📡 Режим: legacy HTML (операторский fallback)")
-        logging.info("   Для API режима запустите без флагов или используйте --api")
-        main()

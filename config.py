@@ -9,7 +9,17 @@ DEFAULT_MODE = "api"
 VALID_MODES = {"api", "html"}
 ENV_MODE_VAR = "UPBIT_MODE"
 API_ERROR_THRESHOLD_ENV = "UPBIT_API_ERROR_THRESHOLD"
+API_RECOVERY_OK_ENV = "UPBIT_API_RECOVERY_OK"
+API_SLEEP_MS_ENV = "UPBIT_API_SLEEP_MS"
+HTML_REFRESH_MS_ENV = "UPBIT_HTML_REFRESH_MS"
+JITTER_MS_ENV = "UPBIT_JITTER_MS"
+NO_AUTOFALLBACK_ENV = "UPBIT_NO_AUTOFALLBACK"
+
 DEFAULT_API_ERROR_THRESHOLD = 5
+DEFAULT_API_RECOVERY_OK = 20
+DEFAULT_API_SLEEP_MS = (100, 300)  # Base sleep range in ms
+DEFAULT_HTML_REFRESH_MS = (800, 1200)  # HTML refresh range in ms
+DEFAULT_JITTER_MS = (20, 40)  # Jitter range in ms
 SUMMARY_INTERVAL_SECONDS = 60
 API_IDLE_BASE_RANGE: Tuple[float, float] = (0.1, 0.3)
 API_IDLE_JITTER_RANGE: Tuple[float, float] = (0.02, 0.04)
@@ -32,6 +42,7 @@ def parse_cli_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser.add_argument("--api", action="store_true", help="Forces API mode")
     parser.add_argument("--html", action="store_true", help="Forces legacy HTML mode")
     parser.add_argument("--legacy", action="store_true", help="Alias for --html")
+    parser.add_argument("--no-autofallback", action="store_true", help="Disable auto-fallback between API and HTML modes")
     return parser.parse_args(argv)
 
 
@@ -103,3 +114,83 @@ def get_api_error_threshold() -> Tuple[int, Optional[str]]:
         return parsed, raw_value
     except ValueError:
         return DEFAULT_API_ERROR_THRESHOLD, raw_value
+
+
+def get_api_recovery_ok() -> Tuple[int, Optional[str]]:
+    """Возвращает порог восстановления API и исходное значение из окружения."""
+
+    raw_value = os.getenv(API_RECOVERY_OK_ENV)
+    if raw_value is None:
+        return DEFAULT_API_RECOVERY_OK, None
+
+    try:
+        parsed = int(raw_value)
+        if parsed < 1:
+            return DEFAULT_API_RECOVERY_OK, raw_value
+        return parsed, raw_value
+    except ValueError:
+        return DEFAULT_API_RECOVERY_OK, raw_value
+
+
+def get_sleep_ranges() -> Tuple[Tuple[int, int], Tuple[int, int], Tuple[int, int], Optional[str], Optional[str], Optional[str]]:
+    """Возвращает диапазоны сна и джиттера в миллисекундах."""
+    
+    # API sleep range
+    api_raw = os.getenv(API_SLEEP_MS_ENV)
+    if api_raw:
+        try:
+            parts = [int(x.strip()) for x in api_raw.split(',')]
+            if len(parts) == 2 and parts[0] > 0 and parts[1] > 0:
+                api_range = (min(parts), max(parts))
+            else:
+                api_range = DEFAULT_API_SLEEP_MS
+        except (ValueError, AttributeError):
+            api_range = DEFAULT_API_SLEEP_MS
+    else:
+        api_range = DEFAULT_API_SLEEP_MS
+    
+    # HTML refresh range
+    html_raw = os.getenv(HTML_REFRESH_MS_ENV)
+    if html_raw:
+        try:
+            parts = [int(x.strip()) for x in html_raw.split(',')]
+            if len(parts) == 2 and parts[0] > 0 and parts[1] > 0:
+                html_range = (min(parts), max(parts))
+            else:
+                html_range = DEFAULT_HTML_REFRESH_MS
+        except (ValueError, AttributeError):
+            html_range = DEFAULT_HTML_REFRESH_MS
+    else:
+        html_range = DEFAULT_HTML_REFRESH_MS
+    
+    # Jitter range
+    jitter_raw = os.getenv(JITTER_MS_ENV)
+    if jitter_raw:
+        try:
+            parts = [int(x.strip()) for x in jitter_raw.split(',')]
+            if len(parts) == 2 and parts[0] >= 0 and parts[1] >= 0:
+                jitter_range = (min(parts), max(parts))
+            else:
+                jitter_range = DEFAULT_JITTER_MS
+        except (ValueError, AttributeError):
+            jitter_range = DEFAULT_JITTER_MS
+    else:
+        jitter_range = DEFAULT_JITTER_MS
+    
+    return api_range, html_range, jitter_range, api_raw, html_raw, jitter_raw
+
+
+def is_autofallback_disabled() -> bool:
+    """Проверяет, отключен ли авто-фоллбэк."""
+    
+    # Check CLI flag first
+    import sys
+    if '--no-autofallback' in sys.argv:
+        return True
+    
+    # Then check environment variable
+    env_value = os.getenv(NO_AUTOFALLBACK_ENV)
+    if env_value:
+        return env_value.strip().lower() in ('1', 'true', 'yes', 'on')
+    
+    return False
