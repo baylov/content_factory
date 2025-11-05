@@ -33,6 +33,14 @@ logging.basicConfig(
     ]
 )
 
+# Global tracking for fallback invocations
+_last_parse_stats = {
+    'fallback_invoked': False,
+    'filter_stats': {},
+    'total_raw_links': 0,
+    'total_filtered_links': 0
+}
+
 
 class MetricsLogger:
     """
@@ -235,7 +243,8 @@ def init_driver(enable_cdp=False):
 
 def debug_save_html_and_find_selectors(driver):
     """
-    Сохраняет HTML страницы и тестирует разные селекторы для диагностики проблем
+    Сохраняет HTML страницы и тестирует разные селекторы для диагностики проблем.
+    Включает расширенный сбор метаданных о ссылках (классы, badges, data-атрибуты).
     """
     try:
         logging.info("🔍 ДИАГНОСТИКА: Начинаем анализ страницы...")
@@ -247,7 +256,7 @@ def debug_save_html_and_find_selectors(driver):
             f.write(html)
         logging.info(f"💾 HTML сохранен в {debug_file}")
         
-        # Тестируем разные селекторы через JavaScript
+        # Тестируем разные селекторы через JavaScript с метаданными
         selectors_to_test = [
             'a[href*="/service_center/notice?id="]',
             'a[href*="/service_center/notice"]',
@@ -259,7 +268,7 @@ def debug_save_html_and_find_selectors(driver):
             'tr a',
         ]
         
-        logging.info("🔍 Тестируем селекторы:")
+        logging.info("🔍 Тестируем селекторы с метаданными:")
         best_selector = None
         best_count = 0
         
@@ -269,9 +278,17 @@ def debug_save_html_and_find_selectors(driver):
                     const links = document.querySelectorAll('{selector}');
                     const samples = [];
                     for (let i = 0; i < Math.min(3, links.length); i++) {{
+                        const link = links[i];
+                        const parentRow = link.closest('tr');
+                        const badge = link.querySelector('.badge, .tag, [class*="badge"], [class*="pin"]');
+                        
                         samples.push({{
-                            href: links[i].getAttribute('href') || '',
-                            text: links[i].textContent.trim().substring(0, 50)
+                            href: link.getAttribute('href') || '',
+                            text: link.textContent.trim().substring(0, 50),
+                            parentClasses: parentRow ? parentRow.className : '',
+                            badgeText: badge ? badge.textContent.trim() : '',
+                            dataPinned: link.dataset.pinned || (parentRow ? parentRow.dataset.pinned : ''),
+                            dataFixed: link.dataset.fixed || (parentRow ? parentRow.dataset.fixed : '')
                         }});
                     }}
                     return {{
@@ -294,6 +311,16 @@ def debug_save_html_and_find_selectors(driver):
                         text = s['text'][:50]
                         href = s['href'][:60] if s['href'] else 'NO HREF'
                         logging.info(f"     📄 {text} -> {href}")
+                        
+                        # Показываем метаданные если есть
+                        if s.get('parentClasses'):
+                            logging.info(f"        🏷️ Parent classes: {s['parentClasses'][:50]}")
+                        if s.get('badgeText'):
+                            logging.info(f"        🔖 Badge: {s['badgeText']}")
+                        if s.get('dataPinned'):
+                            logging.info(f"        📌 data-pinned: {s['dataPinned']}")
+                        if s.get('dataFixed'):
+                            logging.info(f"        📍 data-fixed: {s['dataFixed']}")
             except Exception as e:
                 logging.error(f"  ❌ Ошибка тестирования селектора '{selector}': {e}")
         
@@ -456,13 +483,17 @@ def wait_for_notices_js(driver, max_wait=0.3):
     return False, probe_stats
 
 
-def get_all_notice_ids(driver):
+def get_all_notice_ids(driver, min_expected_count=20):
     """
-    Извлекает ID новостей ТОЧНО как диагностика - множественные простые JavaScript вызовы.
-    Фильтрация и обработка выполняется в Python, не в JavaScript!
+    Извлекает ID новостей с расширенным извлечением метаданных и защитой от чрезмерной фильтрации.
+    Фильтрация выполняется в Python с отслеживанием причин и защитным fallback механизмом.
     
-    Приоритет 1: НАДЕЖНОСТЬ (как диагностика - всегда работает)
-    Приоритет 2: СКОРОСТЬ (< 0.5 сек парсинг)
+    Приоритет 1: НАДЕЖНОСТЬ (никогда не возвращать 0 результатов при наличии валидных ссылок)
+    Приоритет 2: ТОЧНОСТЬ (фильтровать только подтвержденно закрепленные)
+    Приоритет 3: СКОРОСТЬ (< 0.5 сек парсинг)
+    
+    Args:
+        min_expected_count: Минимальное ожидаемое количество новостей (по умолчанию 20)
     
     Возвращает список ID незакрепленных новостей: [5710, 5709, 5701, ...]
     При ошибке автоматически запускает диагностику.
@@ -475,15 +506,37 @@ def get_all_notice_ids(driver):
     """
     parse_start = time.time()
     
+    # JavaScript код для извлечения метаданных
+    js_extract_metadata = """
+        return Array.from(document.querySelectorAll(arguments[0]))
+            .map(link => {
+                const parentRow = link.closest('tr');
+                const parentRowClasses = parentRow ? parentRow.className : '';
+                
+                // Ищем badge элементы
+                const badge = link.querySelector('.badge, .tag, [class*="badge"], [class*="pin"]');
+                const badgeText = badge ? badge.textContent.trim() : '';
+                
+                // Проверяем data-атрибуты
+                const linkData = {
+                    pinned: link.dataset.pinned || (parentRow ? parentRow.dataset.pinned : null),
+                    fixed: link.dataset.fixed || (parentRow ? parentRow.dataset.fixed : null),
+                    type: link.dataset.type || (parentRow ? parentRow.dataset.type : null)
+                };
+                
+                return {
+                    href: link.getAttribute('href'),
+                    text: link.textContent.trim(),
+                    parentClasses: parentRowClasses,
+                    badgeText: badgeText,
+                    dataAttrs: linkData
+                };
+            });
+    """
+    
     try:
         # === СТРАТЕГИЯ 1: Точный селектор (как в диагностике) ===
-        links = driver.execute_script("""
-            return Array.from(document.querySelectorAll('a[href*="/service_center/notice?id="]'))
-                .map(link => ({
-                    href: link.getAttribute('href'),
-                    text: link.textContent.trim()
-                }));
-        """)
+        links = driver.execute_script(js_extract_metadata, 'a[href*="/service_center/notice?id="]')
         
         strategy = 'exact_id'
         total_links = len(links)
@@ -492,79 +545,144 @@ def get_all_notice_ids(driver):
         
         # === СТРАТЕГИЯ 2: Все notice ссылки (fallback) ===
         if len(links) == 0:
-            links = driver.execute_script("""
-                return Array.from(document.querySelectorAll('a[href*="/service_center/notice"]'))
-                    .map(link => ({
-                        href: link.getAttribute('href'),
-                        text: link.textContent.trim()
-                    }));
-            """)
+            links = driver.execute_script(js_extract_metadata, 'a[href*="/service_center/notice"]')
             strategy = 'all_notice'
             total_links = len(links)
             logging.info(f"🔍 Strategy 2 (all_notice): {total_links} links")
         
         # === СТРАТЕГИЯ 3: tr a с notice (fallback) ===
         if len(links) == 0:
-            links = driver.execute_script("""
-                return Array.from(document.querySelectorAll('tr a[href*="notice"]'))
-                    .map(link => ({
-                        href: link.getAttribute('href'),
-                        text: link.textContent.trim()
-                    }));
-            """)
+            links = driver.execute_script(js_extract_metadata, 'tr a[href*="notice"]')
             strategy = 'tr_notice'
             total_links = len(links)
             logging.info(f"🔍 Strategy 3 (tr_notice): {total_links} links")
         
         # === СТРАТЕГИЯ 4: любые a с id= (последний fallback) ===
         if len(links) == 0:
-            links = driver.execute_script("""
-                return Array.from(document.querySelectorAll('a[href*="id="]'))
-                    .map(link => ({
-                        href: link.getAttribute('href'),
-                        text: link.textContent.trim()
-                    }));
-            """)
+            links = driver.execute_script(js_extract_metadata, 'a[href*="id="]')
             strategy = 'any_id'
             total_links = len(links)
             logging.info(f"🔍 Strategy 4 (any_id): {total_links} links")
         
-        # === ИЗВЛЕЧЕНИЕ ID в Python (не в JavaScript!) ===
-        notice_ids = []
-        samples = []
+        # === ИЗВЛЕЧЕНИЕ И ФИЛЬТРАЦИЯ в Python с отслеживанием причин ===
+        all_notices = []  # Все распарсенные новости с метаданными
+        filter_stats = {
+            'pinned_badge': 0,
+            'pinned_class': 0,
+            'pinned_marker': 0,
+            'short_navigation': 0,
+            'no_id': 0,
+            'total_filtered': 0
+        }
         
         for link in links:
             href = link.get('href', '')
             text = link.get('text', '')
+            parent_classes = link.get('parentClasses', '').lower()
+            badge_text = link.get('badgeText', '')
+            data_attrs = link.get('dataAttrs', {})
             
             # Извлекаем ID через regex в Python
             match = re.search(r'id=(\d+)', href)
             if not match:
+                filter_stats['no_id'] += 1
                 continue
             
             notice_id = int(match.group(1))
             
-            # === ПРОВЕРКА НА ЗАКРЕПЛЕННОСТЬ (в Python!) ===
-            is_pinned = False
+            # Сохраняем все данные для возможного fallback
+            notice_data = {
+                'id': notice_id,
+                'text': text,
+                'href': href,
+                'parent_classes': parent_classes,
+                'badge_text': badge_text,
+                'data_attrs': data_attrs,
+                'is_pinned': False,
+                'filter_reason': None
+            }
             
-            # Метод 1: Текст содержит маркер
-            if '공지' in text:
-                is_pinned = True
+            # === ПРОВЕРКА НА ЗАКРЕПЛЕННОСТЬ (только с явными маркерами!) ===
             
-            # Метод 2: Текст слишком короткий (навигация)
-            if len(text) < 5:
-                is_pinned = True
+            # Метод 1: Badge содержит маркер закрепления
+            if badge_text and ('공지' in badge_text or 'pin' in badge_text.lower() or 'fixed' in badge_text.lower()):
+                notice_data['is_pinned'] = True
+                notice_data['filter_reason'] = 'pinned_badge'
+                filter_stats['pinned_badge'] += 1
             
-            # Добавляем только незакрепленные
-            if not is_pinned:
-                notice_ids.append(notice_id)
-                
-                # Сохраняем примеры
-                if len(samples) < 3:
-                    samples.append({
-                        'id': notice_id,
-                        'title': text[:50]
-                    })
+            # Метод 2: Класс родительского элемента содержит маркер
+            elif 'pinned' in parent_classes or 'fixed' in parent_classes or 'sticky' in parent_classes:
+                notice_data['is_pinned'] = True
+                notice_data['filter_reason'] = 'pinned_class'
+                filter_stats['pinned_class'] += 1
+            
+            # Метод 3: Data-атрибуты указывают на закрепление
+            elif data_attrs.get('pinned') == 'true' or data_attrs.get('fixed') == 'true' or data_attrs.get('type') == 'pinned':
+                notice_data['is_pinned'] = True
+                notice_data['filter_reason'] = 'pinned_class'
+                filter_stats['pinned_class'] += 1
+            
+            # Метод 4: Текст НАЧИНАЕТСЯ с маркера (не просто содержит где-то)
+            elif text.startswith('공지') or text.startswith('[공지]') or text.startswith('[중요]'):
+                notice_data['is_pinned'] = True
+                notice_data['filter_reason'] = 'pinned_marker'
+                filter_stats['pinned_marker'] += 1
+            
+            # Метод 5: Текст слишком короткий (явная навигация: "다음", "이전", "1", "2")
+            elif len(text) < 3 or (len(text) < 5 and text.isdigit()):
+                notice_data['is_pinned'] = True  # Технически не pinned, но фильтруем
+                notice_data['filter_reason'] = 'short_navigation'
+                filter_stats['short_navigation'] += 1
+            
+            all_notices.append(notice_data)
+        
+        # Подсчитываем отфильтрованные
+        filtered_notices = [n for n in all_notices if not n['is_pinned']]
+        filter_stats['total_filtered'] = len(all_notices) - len(filtered_notices)
+        
+        # === ЗАЩИТНЫЙ FALLBACK: предотвращаем чрезмерную фильтрацию ===
+        fallback_invoked = False
+        
+        if len(filtered_notices) < min_expected_count and len(all_notices) >= min_expected_count:
+            logging.warning(f"⚠️ FALLBACK TRIGGERED: Фильтрация слишком агрессивна!")
+            logging.warning(f"   Было: {len(all_notices)} → После фильтрации: {len(filtered_notices)} < Ожидается: {min_expected_count}")
+            logging.warning(f"   Смягчаем фильтрацию...")
+            
+            fallback_invoked = True
+            
+            # Стратегия fallback: возвращаем те, что отфильтрованы по менее строгим причинам
+            relaxed_notices = [
+                n for n in all_notices 
+                if not n['is_pinned'] or n['filter_reason'] in ['short_navigation', 'pinned_marker']
+            ]
+            
+            # Если все еще мало - берем только verified pinned (badge + class)
+            if len(relaxed_notices) < min_expected_count:
+                relaxed_notices = [
+                    n for n in all_notices
+                    if not n['is_pinned'] or n['filter_reason'] not in ['pinned_badge', 'pinned_class']
+                ]
+            
+            # Последний fallback - берем все
+            if len(relaxed_notices) < min_expected_count:
+                logging.warning(f"   CRITICAL FALLBACK: Возвращаем все новости без фильтрации!")
+                relaxed_notices = all_notices
+            
+            filtered_notices = relaxed_notices
+            logging.info(f"   ✅ После fallback: {len(filtered_notices)} новостей")
+        
+        # === ФОРМИРОВАНИЕ РЕЗУЛЬТАТА ===
+        notice_ids = [n['id'] for n in filtered_notices]
+        samples = [{'id': n['id'], 'title': n['text'][:50]} for n in filtered_notices[:3]]
+        
+        # Обновляем глобальную статистику
+        global _last_parse_stats
+        _last_parse_stats = {
+            'fallback_invoked': fallback_invoked,
+            'filter_stats': filter_stats,
+            'total_raw_links': len(all_notices),
+            'total_filtered_links': len(filtered_notices)
+        }
         
         parse_time = time.time() - parse_start
         
@@ -574,6 +692,7 @@ def get_all_notice_ids(driver):
             logging.error(f"   Strategy: {strategy}")
             logging.error(f"   Total links found: {total_links}")
             logging.error(f"   После фильтрации: {len(notice_ids)}")
+            logging.error(f"   Filter stats: {filter_stats}")
             logging.error("💡 Запускаем диагностику...")
             debug_save_html_and_find_selectors(driver)
             return []
@@ -581,6 +700,23 @@ def get_all_notice_ids(driver):
         # === УСПЕХ! ===
         logging.info(f"✅ Найдено {len(notice_ids)} новостей (strategy: {strategy}, total links: {total_links})")
         logging.info(f"🔢 ID: {notice_ids[:5]}{'...' if len(notice_ids) > 5 else ''}")
+        
+        # Статистика фильтрации
+        if filter_stats['total_filtered'] > 0:
+            logging.info(f"🗂️ Фильтрация: отброшено {filter_stats['total_filtered']} элементов")
+            if filter_stats['pinned_badge'] > 0:
+                logging.info(f"   • Pinned (badge): {filter_stats['pinned_badge']}")
+            if filter_stats['pinned_class'] > 0:
+                logging.info(f"   • Pinned (class/data): {filter_stats['pinned_class']}")
+            if filter_stats['pinned_marker'] > 0:
+                logging.info(f"   • Pinned (marker): {filter_stats['pinned_marker']}")
+            if filter_stats['short_navigation'] > 0:
+                logging.info(f"   • Navigation/short: {filter_stats['short_navigation']}")
+            if filter_stats['no_id'] > 0:
+                logging.info(f"   • No ID: {filter_stats['no_id']}")
+        
+        if fallback_invoked:
+            logging.warning(f"🛡️ FALLBACK WAS INVOKED - фильтрация была смягчена")
         
         # Примеры новостей
         if samples:
@@ -614,6 +750,13 @@ def get_all_notice_ids(driver):
             logging.error(f"❌ Ошибка диагностики: {debug_error}")
         
         return []
+
+
+def get_last_parse_stats():
+    """
+    Возвращает статистику последнего парсинга (для observability)
+    """
+    return _last_parse_stats.copy()
 
 
 def get_notice_by_id(driver, notice_id):
