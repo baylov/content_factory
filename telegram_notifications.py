@@ -33,6 +33,7 @@ class TelegramSendResult:
     success: bool
     attempts: int
     reason: Optional[str] = None
+    api_duration_ms: Optional[float] = None  # Time spent on actual Telegram API calls
 
 
 class TelegramRetryTelemetry:
@@ -188,13 +189,22 @@ def send_to_telegram(
 
     attempts_made = 0
     last_reason: Optional[str] = None
+    total_api_time = 0.0  # Track total time spent on API calls
 
     try:
         while attempts_made < max_attempts:
             attempts_made += 1
             try:
+                api_start = time.perf_counter()
                 response: Response = temp_session.post(api_url, json=payload, timeout=timeout)
+                api_end = time.perf_counter()
+                total_api_time += (api_end - api_start)
             except RETRYABLE_EXCEPTIONS as exc:
+                # Measure time for failed request as well
+                api_end = time.perf_counter() if 'api_start' in locals() else time.perf_counter()
+                if 'api_start' in locals():
+                    total_api_time += (api_end - api_start)
+                
                 last_reason = f"{type(exc).__name__}: {exc}"
                 if attempts_made >= max_attempts:
                     logging.error(
@@ -227,7 +237,11 @@ def send_to_telegram(
                 logging.info("✅ Отправлено (попытка %d)", attempts_made)
                 if telemetry:
                     telemetry.record_result(attempts_made, True)
-                return TelegramSendResult(success=True, attempts=attempts_made)
+                return TelegramSendResult(
+                    success=True, 
+                    attempts=attempts_made,
+                    api_duration_ms=total_api_time * 1000
+                )
 
             body_preview = _truncate(response.text)
 
@@ -293,6 +307,7 @@ def send_to_telegram(
             success=False,
             attempts=attempts_made,
             reason=fail_reason,
+            api_duration_ms=total_api_time * 1000 if total_api_time > 0 else None
         )
     finally:
         if close_session:

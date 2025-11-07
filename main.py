@@ -177,6 +177,86 @@ metrics_logger = MetricsLogger()
 telegram_retry_telemetry = TelegramRetryTelemetry()
 
 
+class ProcessingDelayTelemetry:
+    """
+    Telemetry for tracking processing delays from detection to Telegram send.
+    """
+    
+    def __init__(self, summary_interval=60):
+        self.summary_interval = summary_interval
+        self.last_summary_time = time.monotonic()
+        self.reset()
+    
+    def reset(self):
+        self.detection_lags = []  # published → detected
+        self.processing_delays = []  # detected → sent
+        self.telegram_delays = []  # just API call time
+        self.failed_processing_times = []  # processing time for failed sends
+        self.failed_attempts = []  # number of attempts for failed sends
+    
+    def record_success(self, detection_lag_ms, processing_delay_ms, telegram_delay_ms):
+        """Record successful notice processing with all three delay metrics."""
+        self.detection_lags.append(detection_lag_ms / 1000)  # Convert to seconds
+        self.processing_delays.append(processing_delay_ms / 1000)
+        self.telegram_delays.append(telegram_delay_ms / 1000)
+        self.maybe_log_summary()
+    
+    def record_failure(self, processing_delay_ms, attempts):
+        """Record failed notice processing."""
+        self.failed_processing_times.append(processing_delay_ms / 1000)
+        self.failed_attempts.append(attempts)
+        self.maybe_log_summary()
+    
+    @staticmethod
+    def _percentile(values, percentile):
+        if not values:
+            return None
+        ordered = sorted(values)
+        index = max(0, min(len(ordered) - 1, math.ceil(percentile / 100 * len(ordered)) - 1))
+        return ordered[index]
+    
+    def maybe_log_summary(self):
+        """Log summary if interval has passed."""
+        now = time.monotonic()
+        if now - self.last_summary_time < self.summary_interval:
+            return
+        
+        if self.detection_lags or self.processing_delays or self.telegram_delays:
+            # Calculate stats for successful sends
+            detect_avg = sum(self.detection_lags) / len(self.detection_lags) if self.detection_lags else 0
+            detect_p95 = self._percentile(self.detection_lags, 95) or 0
+            detect_max = max(self.detection_lags) if self.detection_lags else 0
+            
+            proc_avg = sum(self.processing_delays) / len(self.processing_delays) if self.processing_delays else 0
+            proc_p95 = self._percentile(self.processing_delays, 95) or 0
+            proc_max = max(self.processing_delays) if self.processing_delays else 0
+            
+            tg_avg = sum(self.telegram_delays) / len(self.telegram_delays) if self.telegram_delays else 0
+            tg_p95 = self._percentile(self.telegram_delays, 95) or 0
+            tg_max = max(self.telegram_delays) if self.telegram_delays else 0
+            
+            logging.info(
+                f"📊 60s summary | detect_lag: avg={detect_avg:.1f}s p95={detect_p95:.1f}s max={detect_max:.1f}s | "
+                f"processing: avg={proc_avg:.3f}s p95={proc_p95:.3f}s max={proc_max:.3f}s | "
+                f"telegram_api: avg={tg_avg:.3f}s p95={tg_p95:.3f}s max={tg_max:.3f}s"
+            )
+            
+            if self.failed_processing_times:
+                failed_avg = sum(self.failed_processing_times) / len(self.failed_processing_times)
+                failed_attempts_avg = sum(self.failed_attempts) / len(self.failed_attempts)
+                logging.info(
+                    f"   Failed sends: {len(self.failed_processing_times)} | "
+                    f"avg_processing: {failed_avg:.3f}s | avg_attempts: {failed_attempts_avg:.1f}"
+                )
+        
+        self.reset()
+        self.last_summary_time = now
+
+
+# Create global telemetry instance
+processing_delay_telemetry = ProcessingDelayTelemetry()
+
+
 class FailureDetector:
     """
     Tracks consecutive API failures and manages auto-fallback logic.
@@ -2138,8 +2218,8 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
     Returns:
         datetime - время отправки в Telegram
     """
-    # Момент отправки
-    send_time = datetime.now()
+    # Момент начала отправки
+    send_start = datetime.now()
 
     notice_id = None
     if link:
@@ -2150,29 +2230,27 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
             except ValueError:
                 notice_id = None
     
-    # Базовое сообщение
+    # Calculate timing metrics first to include them in the message
     message = f"""🔔 <b>Новая новость Upbit</b>
 
 <b>{title}</b>
 
 🔗 {link}"""
     
-    # Добавляем футер с метриками (согласно требованию)
     if detection_time:
-        bot_latency = (send_time - detection_time).total_seconds()
-        
-        # Форматируем времена
+        # Pre-calculate expected timing for inclusion in message
+        bot_latency = (send_start - detection_time).total_seconds()
         detection_str = detection_time.strftime('%H:%M:%S')
-        send_str = send_time.strftime('%H:%M:%S')
         
-        # Футер с метриками
+        # Add timing footer to message
         message += f"""
 
 ⏱ Обнаружено: {detection_str}
-📤 Отправлено: {send_str}
-⚡️ Задержка: {bot_latency:.1f} сек"""
+⚡️ Обработка началась: {send_start.strftime('%H:%M:%S')}
+⚡️ Задержка до обработки: {bot_latency:.1f} сек"""
     
-    send_to_telegram(
+    # Отправляем в Telegram и измеряем время
+    send_result = send_to_telegram(
         None,
         TELEGRAM_TOKEN,
         TELEGRAM_CHAT_ID,
@@ -2182,7 +2260,38 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
         parse_mode="HTML",
     )
     
-    return send_time
+    # Момент завершения отправки
+    send_end = datetime.now()
+    
+    # Calculate timing metrics for logging and telemetry
+    if detection_time:
+        processing_delay_ms = (send_end - detection_time).total_seconds() * 1000
+        
+        # Use actual API timing if available, otherwise use total send time
+        if send_result.api_duration_ms is not None:
+            telegram_delay_ms = send_result.api_duration_ms
+        else:
+            telegram_delay_ms = (send_end - send_start).total_seconds() * 1000
+        
+        if send_result.success:
+            # Log timing metrics for successful send
+            logging.info(f"   ⏱️ Обработка и отправка: {processing_delay_ms:.0f}ms (detected → sent)")
+            logging.info(f"   ⏱️ Отправка в Telegram: {telegram_delay_ms:.0f}ms (just API call)")
+            
+            # Record in telemetry (HTML mode doesn't have published time, so use 0 for detection_lag)
+            processing_delay_telemetry.record_success(
+                0,  # No published time in HTML mode
+                processing_delay_ms, 
+                telegram_delay_ms
+            )
+        else:
+            # Log timing metrics for failed send
+            logging.error(f"   ❌ Не отправлено (обработка: {processing_delay_ms:.0f}ms, попыток: {send_result.attempts})")
+            
+            # Record failure in telemetry
+            processing_delay_telemetry.record_failure(processing_delay_ms, send_result.attempts)
+    
+    return send_end
 
 
 def get_random_delay():
@@ -2460,12 +2569,13 @@ def send_notice_with_delay(notice, session):
     published_at_str = notice["listed_at"]  # "2025-01-05T19:55:05+09:00"
     published_at = datetime.fromisoformat(published_at_str)
     
-    # Текущее время в KST
+    # Capture timestamps for timing metrics
     detected_at = datetime.now(ZoneInfo("Asia/Seoul"))
+    send_start = datetime.now()
     
     # Вычисляем задержку обнаружения
-    delay_seconds = max((detected_at - published_at).total_seconds(), 0.0)
-    delay_ms = delay_seconds * 1000
+    detection_lag_seconds = max((detected_at - published_at).total_seconds(), 0.0)
+    detection_lag_ms = detection_lag_seconds * 1000
     
     # Форматируем времена
     pub_time = published_at.strftime("%H:%M:%S")
@@ -2478,7 +2588,7 @@ def send_notice_with_delay(notice, session):
     logging.info(f"   🏷️ Категория: {category}")
     logging.info(f"   🕐 Опубликовано: {pub_date} {pub_time} KST")
     logging.info(f"   🕐 Обнаружено:   {detected_at.strftime('%Y-%m-%d')} {det_time} KST")
-    logging.info(f"   ⏱️ Задержка обнаружения: {delay_ms:.0f} ms ({delay_seconds:.3f}s)")
+    logging.info(f"   ⏱️ Задержка обнаружения: {detection_lag_ms:.0f}ms ({detection_lag_seconds:.3f}s)")
     
     # Telegram сообщение
     message = f"""🆕 <b>Новая новость Upbit!</b>
@@ -2488,12 +2598,12 @@ def send_notice_with_delay(notice, session):
 📰 <b>{title}</b>
 
 🕐 Опубликовано: {pub_time}
-⏱️ Обнаружено через: {delay_ms:.0f} мс ({delay_seconds:.2f} сек)
+⏱️ Обнаружено через: {detection_lag_ms:.0f} мс ({detection_lag_seconds:.2f} сек)
 
 🔗 https://upbit.com/service_center/notice?id={notice_id}"""
     
-    # Отправляем в Telegram
-    send_to_telegram(
+    # Отправляем в Telegram и измеряем время
+    send_result = send_to_telegram(
         session,
         TELEGRAM_TOKEN,
         TELEGRAM_CHAT_ID,
@@ -2502,6 +2612,34 @@ def send_notice_with_delay(notice, session):
         telemetry=telegram_retry_telemetry,
         parse_mode="HTML",
     )
+    
+    # Calculate timing metrics
+    send_end = datetime.now()
+    processing_delay_ms = (send_end - detected_at).total_seconds() * 1000
+    
+    # Use actual API timing if available, otherwise use total send time
+    if send_result.api_duration_ms is not None:
+        telegram_delay_ms = send_result.api_duration_ms
+    else:
+        telegram_delay_ms = (send_end - send_start).total_seconds() * 1000
+    
+    if send_result.success:
+        # Log timing metrics for successful send
+        logging.info(f"   ⏱️ Обработка и отправка: {processing_delay_ms:.0f}ms (detected → sent)")
+        logging.info(f"   ⏱️ Отправка в Telegram: {telegram_delay_ms:.0f}ms (just API call)")
+        
+        # Record in telemetry
+        processing_delay_telemetry.record_success(
+            detection_lag_ms, 
+            processing_delay_ms, 
+            telegram_delay_ms
+        )
+    else:
+        # Log timing metrics for failed send
+        logging.error(f"   ❌ Не отправлено (обработка: {processing_delay_ms:.0f}ms, попыток: {send_result.attempts})")
+        
+        # Record failure in telemetry
+        processing_delay_telemetry.record_failure(processing_delay_ms, send_result.attempts)
 
 
 def process_new_notices(notices, session):
