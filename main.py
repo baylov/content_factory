@@ -25,6 +25,8 @@ from selenium.common.exceptions import TimeoutException, WebDriverException
 from webdriver_manager.chrome import ChromeDriverManager
 from selenium_stealth import stealth
 
+from telegram_notifications import TelegramRetryTelemetry, send_to_telegram
+
 from config import (
     API_ERROR_THRESHOLD_ENV,
     API_IDLE_BASE_RANGE,
@@ -163,6 +165,7 @@ Error: {error_message}
 
 # Создаем глобальный экземпляр MetricsLogger
 metrics_logger = MetricsLogger()
+telegram_retry_telemetry = TelegramRetryTelemetry()
 
 
 class FailureDetector:
@@ -1838,12 +1841,17 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
     Returns:
         datetime - время отправки в Telegram
     """
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
-        return datetime.now()
-    
     # Момент отправки
     send_time = datetime.now()
+
+    notice_id = None
+    if link:
+        match = re.search(r"id=(\d+)", link)
+        if match:
+            try:
+                notice_id = int(match.group(1))
+            except ValueError:
+                notice_id = None
     
     # Базовое сообщение
     message = f"""🔔 <b>Новая новость Upbit</b>
@@ -1867,23 +1875,15 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
 📤 Отправлено: {send_str}
 ⚡️ Задержка: {bot_latency:.1f} сек"""
     
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    
-    try:
-        response = requests.post(api_url, json=data, timeout=10)
-        
-        if response.status_code == 200:
-            logging.info("✅ Уведомление отправлено в Telegram")
-        else:
-            logging.error(f"❌ Ошибка отправки в Telegram: {response.text}")
-    except requests.exceptions.RequestException as e:
-        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+    send_to_telegram(
+        None,
+        TELEGRAM_TOKEN,
+        TELEGRAM_CHAT_ID,
+        message,
+        notice_id=notice_id,
+        telemetry=telegram_retry_telemetry,
+        parse_mode="HTML",
+    )
     
     return send_time
 
@@ -2196,27 +2196,15 @@ def send_notice_with_delay(notice, session):
 🔗 https://upbit.com/service_center/notice?id={notice_id}"""
     
     # Отправляем в Telegram
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        logging.error("TELEGRAM_TOKEN или TELEGRAM_CHAT_ID не установлены в .env")
-        return
-    
-    api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    data = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML"
-    }
-    
-    try:
-        response = session.post(api_url, json=data, timeout=10)
-        
-        if response.status_code == 200:
-            logging.info(f"✅ Уведомление отправлено (ID: {notice_id})")
-        else:
-            logging.error(f"❌ Ошибка отправки в Telegram: {response.text}")
-    except Exception as e:
-        logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+    send_to_telegram(
+        session,
+        TELEGRAM_TOKEN,
+        TELEGRAM_CHAT_ID,
+        message,
+        notice_id=notice_id,
+        telemetry=telegram_retry_telemetry,
+        parse_mode="HTML",
+    )
 
 
 def process_new_notices(notices, session):
@@ -2506,28 +2494,15 @@ def main_hybrid(
 
 🔗 https://upbit.com/service_center/notice?id={notice_id}"""
                                     
-                                    if TELEGRAM_TOKEN and TELEGRAM_CHAT_ID:
-                                        api_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-                                        data = {
-                                            "chat_id": TELEGRAM_CHAT_ID,
-                                            "text": message,
-                                            "parse_mode": "HTML"
-                                        }
-                                        
-                                        try:
-                                            response = mode_manager.html_driver.execute_script(f"""
-                                                return fetch('{api_url}', {{
-                                                    method: 'POST',
-                                                    headers: {{'Content-Type': 'application/json'}},
-                                                    body: JSON.stringify({data})
-                                                }}).then(r => r.json());
-                                            """)
-                                            if response.get('ok'):
-                                                logging.info(f"✅ Уведомление отправлено (ID: {notice_id})")
-                                            else:
-                                                logging.error(f"❌ Ошибка отправки в Telegram: {response}")
-                                        except Exception as e:
-                                            logging.error(f"❌ Ошибка отправки в Telegram: {e}")
+                                    send_to_telegram(
+                                        None,
+                                        TELEGRAM_TOKEN,
+                                        TELEGRAM_CHAT_ID,
+                                        message,
+                                        notice_id=notice_id,
+                                        telemetry=telegram_retry_telemetry,
+                                        parse_mode="HTML",
+                                    )
                                 
                                 save_max_id(max_id)
                                 last_known_id = max_id
