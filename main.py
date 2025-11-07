@@ -162,7 +162,7 @@ Sent to Telegram: {sent_str}
         """
         Логирует ошибку обработки новости
         """
-        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
+        timestamp = datetime.now(ZoneInfo("Asia/Seoul")).strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
         log_message = f"""
 [{timestamp}] ━━━ ERROR ━━━
 ID: {notice_id} | Title: "{title}"
@@ -1797,7 +1797,7 @@ def discover_api_endpoints(driver, save_to_file=True):
         # Сохраняем результаты
         if save_to_file:
             discovery_data = {
-                'timestamp': datetime.now().isoformat(),
+                'timestamp': datetime.now(ZoneInfo("Asia/Seoul")).isoformat(),
                 'total_network_events': len(logs),
                 'json_responses': json_responses,
                 'api_candidates': api_candidates
@@ -2141,16 +2141,16 @@ def notify_about_new_ids(driver, new_ids, *, detection_start=None, pause_between
     
     for index, notice_id in enumerate(sorted_ids):
         # Время обнаружения
-        detection_time = detection_start if detection_start is not None else datetime.now()
-        
+        detection_time = detection_start if detection_start is not None else datetime.now(ZoneInfo("Asia/Seoul"))
+
         # Начало обработки
-        processing_start = datetime.now()
-        
+        processing_start = datetime.now(ZoneInfo("Asia/Seoul"))
+
         # Получаем данные новости
         notice = get_notice_by_id(driver, notice_id)
-        
+
         # Завершение обработки
-        processing_completed = datetime.now()
+        processing_completed = datetime.now(ZoneInfo("Asia/Seoul"))
         
         if not notice:
             logging.error(f"❌ Не удалось получить данные новости ID {notice_id}")
@@ -2219,49 +2219,49 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
         datetime - время отправки в Telegram
     """
     # Момент начала отправки
-    send_start = datetime.now()
+    send_start = datetime.now(ZoneInfo("Asia/Seoul"))
 
     notice_id = None
     if link:
-        match = re.search(r"id=(\d+)", link)
-        if match:
-            try:
-                notice_id = int(match.group(1))
-            except ValueError:
-                notice_id = None
-    
+       match = re.search(r"id=(\d+)", link)
+       if match:
+           try:
+               notice_id = int(match.group(1))
+           except ValueError:
+               notice_id = None
+
     # Calculate timing metrics first to include them in the message
     message = f"""🔔 <b>Новая новость Upbit</b>
 
-<b>{title}</b>
+    <b>{title}</b>
 
-🔗 {link}"""
-    
+    🔗 {link}"""
+
     if detection_time:
-        # Pre-calculate expected timing for inclusion in message
-        bot_latency = (send_start - detection_time).total_seconds()
-        detection_str = detection_time.strftime('%H:%M:%S')
-        
-        # Add timing footer to message
-        message += f"""
+       # Pre-calculate expected timing for inclusion in message
+       bot_latency = (send_start - detection_time).total_seconds()
+       detection_str = detection_time.strftime('%H:%M:%S')
 
-⏱ Обнаружено: {detection_str}
-⚡️ Обработка началась: {send_start.strftime('%H:%M:%S')}
-⚡️ Задержка до обработки: {bot_latency:.1f} сек"""
-    
+       # Add timing footer to message
+       message += f"""
+
+    ⏱ Обнаружено: {detection_str}
+    ⚡️ Обработка началась: {send_start.strftime('%H:%M:%S')}
+    ⚡️ Задержка до обработки: {bot_latency:.1f} сек"""
+
     # Отправляем в Telegram и измеряем время
     send_result = send_to_telegram(
-        None,
-        TELEGRAM_TOKEN,
-        TELEGRAM_CHAT_ID,
-        message,
-        notice_id=notice_id,
-        telemetry=telegram_retry_telemetry,
-        parse_mode="HTML",
+       None,
+       TELEGRAM_TOKEN,
+       TELEGRAM_CHAT_ID,
+       message,
+       notice_id=notice_id,
+       telemetry=telegram_retry_telemetry,
+       parse_mode="HTML",
     )
-    
+
     # Момент завершения отправки
-    send_end = datetime.now()
+    send_end = datetime.now(ZoneInfo("Asia/Seoul"))
     
     # Calculate timing metrics for logging and telemetry
     if detection_time:
@@ -2568,10 +2568,10 @@ def send_notice_with_delay(notice, session):
     # Парсим время публикации (ISO 8601 с timezone)
     published_at_str = notice["listed_at"]  # "2025-01-05T19:55:05+09:00"
     published_at = datetime.fromisoformat(published_at_str)
-    
+
     # Capture timestamps for timing metrics
     detected_at = datetime.now(ZoneInfo("Asia/Seoul"))
-    send_start = datetime.now()
+    send_start = datetime.now(ZoneInfo("Asia/Seoul"))
     
     # Вычисляем задержку обнаружения
     detection_lag_seconds = max((detected_at - published_at).total_seconds(), 0.0)
@@ -2614,7 +2614,7 @@ def send_notice_with_delay(notice, session):
     )
     
     # Calculate timing metrics
-    send_end = datetime.now()
+    send_end = datetime.now(ZoneInfo("Asia/Seoul"))
     processing_delay_ms = (send_end - detected_at).total_seconds() * 1000
     
     # Use actual API timing if available, otherwise use total send time
@@ -2624,22 +2624,24 @@ def send_notice_with_delay(notice, session):
         telegram_delay_ms = (send_end - send_start).total_seconds() * 1000
     
     if send_result.success:
-        # Log timing metrics for successful send
-        logging.info(f"   ⏱️ Обработка и отправка: {processing_delay_ms:.0f}ms (detected → sent)")
-        logging.info(f"   ⏱️ Отправка в Telegram: {telegram_delay_ms:.0f}ms (just API call)")
-        
-        # Record in telemetry
-        processing_delay_telemetry.record_success(
-            detection_lag_ms, 
-            processing_delay_ms, 
-            telegram_delay_ms
-        )
+       # Log timing metrics for successful send
+       logging.info(f"   ⏱️ Обработка и отправка: {processing_delay_ms:.0f}ms (detected → sent)")
+       logging.info(f"   ⏱️ Отправка в Telegram: {telegram_delay_ms:.0f}ms (just API call)")
+
+       # Record in telemetry
+       processing_delay_telemetry.record_success(
+           detection_lag_ms,
+           processing_delay_ms,
+           telegram_delay_ms
+       )
     else:
-        # Log timing metrics for failed send
-        logging.error(f"   ❌ Не отправлено (обработка: {processing_delay_ms:.0f}ms, попыток: {send_result.attempts})")
-        
-        # Record failure in telemetry
-        processing_delay_telemetry.record_failure(processing_delay_ms, send_result.attempts)
+       # Log timing metrics for failed send
+       logging.error(f"   ❌ Не отправлено (обработка: {processing_delay_ms:.0f}ms, попыток: {send_result.attempts})")
+
+       # Record failure in telemetry
+       processing_delay_telemetry.record_failure(processing_delay_ms, send_result.attempts)
+
+    return send_result
 
 
 def process_new_notices(notices, session):
@@ -2692,11 +2694,24 @@ def process_new_notices(notices, session):
         logging.info(f"   🆕 Новые ID: {new_ids}")
         
         for notice in new_notices:
-            send_notice_with_delay(notice, session)
+            send_result = send_notice_with_delay(notice, session)
+            if send_result.success:
+                # Save max_id immediately after successful send
+                try:
+                    notice_id = notice["id"]
+                    save_max_id(notice_id)
+                    logging.info(f"[save_max_id] Сохранён max_id: {notice_id}")
+                except Exception as e:
+                    logging.error(f"[save_max_id] Ошибка сохранения max_id {notice_id}: {e}")
             if len(new_notices) > 1:
                 time.sleep(0.5)
-        
-        save_max_id(max_id)
+
+        # Final save of max_id to ensure it's updated
+        try:
+            save_max_id(max_id)
+            logging.info(f"[save_max_id] Финальное сохранение max_id: {max_id}")
+        except Exception as e:
+            logging.error(f"[save_max_id] Ошибка финального сохранения max_id: {e}")
         metrics["updated_last_id"] = max_id
         logging.info(f"📊 Обновлён max_id: {last_known_id} → {max_id}")
     else:
@@ -3221,17 +3236,17 @@ def main():
         if last_known_max_id is None:
             # ПЕРВЫЙ ЗАПУСК - отправляем уведомление о текущей максимальной новости
             logging.info("🆕 ПЕРВЫЙ ЗАПУСК - инициализация")
-            
+
             # Время обнаружения
-            detection_start = datetime.now()
-            
+            detection_start = datetime.now(ZoneInfo("Asia/Seoul"))
+
             # Начало обработки
-            processing_start = datetime.now()
-            
+            processing_start = datetime.now(ZoneInfo("Asia/Seoul"))
+
             notice = get_notice_by_id(driver, page_max_id)
-            
+
             # Завершение обработки
-            processing_completed = datetime.now()
+            processing_completed = datetime.now(ZoneInfo("Asia/Seoul"))
             
             if not notice:
                 logging.error(f"❌ Не удалось получить данные новости ID {page_max_id}")
@@ -3315,11 +3330,11 @@ def main():
                 
                 logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, random: {human_delay:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
                 time.sleep(total_delay)
-                
+
                 # Время начала refresh
-                refresh_start_time = datetime.now()
+                refresh_start_time = datetime.now(ZoneInfo("Asia/Seoul"))
                 refresh_count += 1
-                
+
                 logging.info(f"🔄 Refresh #{refresh_count} в {refresh_start_time.strftime('%H:%M:%S')}...")
                 
                 try:
@@ -3365,8 +3380,8 @@ def main():
                     continue
                 
                 # Получаем время после загрузки - момент обнаружения новостей
-                detection_time = datetime.now()
-                
+                detection_time = datetime.now(ZoneInfo("Asia/Seoul"))
+
                 if not all_ids:
                     logging.warning("⚠️ Не удалось получить ID после refresh")
                     continue
@@ -3403,7 +3418,7 @@ def main():
                 # Проверяем на 429 ошибку
                 if '429' in error_msg or 'rate limit' in error_msg or 'too many requests' in error_msg:
                     rate_limit_backoff = random.uniform(10, 30)
-                    last_429_time = datetime.now()
+                    last_429_time = datetime.now(ZoneInfo("Asia/Seoul"))
                     logging.error(f"❌ Обнаружена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
                     continue
                 
@@ -3431,7 +3446,7 @@ def main():
                             logging.info("🆕 После переинициализации: обнаружены новые ID!")
                             new_ids = [nid for nid in all_ids if nid > current_max_id]
                             new_ids.sort()
-                            detection_start = datetime.now()
+                            detection_start = datetime.now(ZoneInfo("Asia/Seoul"))
                             notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
                             current_max_id = page_max_id
                             save_max_id(current_max_id)
