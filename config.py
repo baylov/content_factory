@@ -14,6 +14,7 @@ API_SLEEP_MS_ENV = "UPBIT_API_SLEEP_MS"
 HTML_REFRESH_MS_ENV = "UPBIT_HTML_REFRESH_MS"
 JITTER_MS_ENV = "UPBIT_JITTER_MS"
 NO_AUTOFALLBACK_ENV = "UPBIT_NO_AUTOFALLBACK"
+AGGRESSIVE_MODE_ENV = "UPBIT_AGGRESSIVE_MODE"
 
 DEFAULT_API_ERROR_THRESHOLD = 5
 DEFAULT_API_RECOVERY_OK = 20
@@ -23,6 +24,15 @@ DEFAULT_JITTER_MS = (20, 40)  # Jitter range in ms
 SUMMARY_INTERVAL_SECONDS = 60
 API_IDLE_BASE_RANGE: Tuple[float, float] = (0.1, 0.3)
 API_IDLE_JITTER_RANGE: Tuple[float, float] = (0.02, 0.04)
+
+# Aggressive mode settings
+AGGRESSIVE_SLEEP_MS = 200  # Fixed 200ms for aggressive mode
+AGGRESSIVE_429_THRESHOLD_LOW = 10  # Backoff to 500ms at 10 429s in 60s
+AGGRESSIVE_429_THRESHOLD_HIGH = 20  # Backoff to 1000ms at 20 429s in 60s
+AGGRESSIVE_429_WINDOW_SECONDS = 60  # Rolling window for 429 detection
+AGGRESSIVE_RECOVERY_CLEAR_SECONDS = 300  # 5 minutes of no 429s to resume aggressive
+AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD = 50  # Backoff at 50 consecutive errors
+AGGRESSIVE_429_PERSIST_THRESHOLD = 600  # 10 minutes of 429s suggests HTML fallback
 
 
 @dataclass
@@ -190,6 +200,17 @@ def is_autofallback_disabled() -> bool:
     
     # Then check environment variable
     env_value = os.getenv(NO_AUTOFALLBACK_ENV)
+    if env_value:
+        return env_value.strip().lower() in ('1', 'true', 'yes', 'on')
+    
+    return False
+
+
+def is_aggressive_mode_enabled() -> bool:
+    """Проверяет, включен ли агрессивный режим опроса."""
+    
+    # Check environment variable
+    env_value = os.getenv(AGGRESSIVE_MODE_ENV)
     if env_value:
         return env_value.strip().lower() in ('1', 'true', 'yes', 'on')
     

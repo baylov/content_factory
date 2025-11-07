@@ -28,6 +28,14 @@ from selenium_stealth import stealth
 from telegram_notifications import TelegramRetryTelemetry, send_to_telegram
 
 from config import (
+    AGGRESSIVE_MODE_ENV,
+    AGGRESSIVE_429_THRESHOLD_LOW,
+    AGGRESSIVE_429_THRESHOLD_HIGH,
+    AGGRESSIVE_429_WINDOW_SECONDS,
+    AGGRESSIVE_RECOVERY_CLEAR_SECONDS,
+    AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD,
+    AGGRESSIVE_429_PERSIST_THRESHOLD,
+    AGGRESSIVE_SLEEP_MS,
     API_ERROR_THRESHOLD_ENV,
     API_IDLE_BASE_RANGE,
     API_IDLE_JITTER_RANGE,
@@ -48,6 +56,7 @@ from config import (
     get_api_error_threshold,
     get_api_recovery_ok,
     get_sleep_ranges,
+    is_aggressive_mode_enabled,
     is_autofallback_disabled,
     parse_cli_args,
     resolve_mode,
@@ -248,6 +257,201 @@ class FailureDetector:
         self.last_failure_summary.clear()
 
 
+class RateLimitDetector:
+    """
+    Advanced rate-limit detection and auto-backoff for aggressive polling mode.
+    
+    Features:
+    - 429 error tracking in rolling windows
+    - Automatic backoff based on 429 frequency
+    - Consecutive error monitoring
+    - Mode tracking (aggressive/normal/throttled)
+    - Recovery detection and auto-resume
+    """
+    
+    def __init__(self):
+        # 429 tracking
+        self._429_timestamps = []  # List of timestamps when 429 occurred
+        self._last_429_window_check = time.time()
+        
+        # Consecutive error tracking
+        self._consecutive_errors = 0
+        self._last_success_time = time.time()
+        
+        # Mode tracking
+        self._current_mode = "normal"  # aggressive, normal, throttled
+        self._mode_changes = []  # List of (timestamp, old_mode, new_mode, reason)
+        
+        # Metrics
+        self._total_api_calls = 0
+        self._successful_calls = 0
+        self._total_429_errors = 0
+        self._total_timeouts = 0
+        
+    def record_api_call(self, success: bool, status_code: int = None, 
+                       error_message: str = None, timestamp: float = None):
+        """Record an API call result and update rate-limit state."""
+        if timestamp is None:
+            timestamp = time.time()
+            
+        self._total_api_calls += 1
+        
+        # Check for 429 errors
+        is_429 = status_code == 429 or (error_message and "429" in error_message.lower())
+        is_timeout = error_message and "timeout" in error_message.lower()
+        
+        if is_429:
+            self._429_timestamps.append(timestamp)
+            self._total_429_errors += 1
+            self._consecutive_errors += 1
+            logging.warning(f"🚫 429 Rate Limit detected (consecutive: {self._consecutive_errors})")
+            
+        elif is_timeout:
+            self._total_timeouts += 1
+            self._consecutive_errors += 1
+            logging.warning(f"⏱️ API Timeout detected (consecutive: {self._consecutive_errors})")
+            
+        elif success:
+            self._successful_calls += 1
+            self._consecutive_errors = 0
+            self._last_success_time = timestamp
+        else:
+            self._consecutive_errors += 1
+            logging.warning(f"❌ API Error (consecutive: {self._consecutive_errors}): {error_message}")
+        
+        # Clean old 429s outside the window
+        self._cleanup_old_429s(timestamp)
+        
+        # Determine if we need to change mode
+        return self._evaluate_mode_change(timestamp)
+    
+    def _cleanup_old_429s(self, current_time: float):
+        """Remove 429 timestamps outside the rolling window."""
+        cutoff_time = current_time - AGGRESSIVE_429_WINDOW_SECONDS
+        self._429_timestamps = [
+            ts for ts in self._429_timestamps if ts >= cutoff_time
+        ]
+    
+    def _evaluate_mode_change(self, timestamp: float) -> tuple:
+        """Evaluate if we need to change polling mode based on current state."""
+        recent_429s = len(self._429_timestamps)
+        old_mode = self._current_mode
+        reason = None
+        
+        # Check for aggressive mode conditions
+        if self._current_mode == "aggressive":
+            if recent_429s >= AGGRESSIVE_429_THRESHOLD_HIGH:
+                self._current_mode = "throttled"
+                reason = f"High 429 rate: {recent_429s} in {AGGRESSIVE_429_WINDOW_SECONDS}s (threshold: {AGGRESSIVE_429_THRESHOLD_HIGH})"
+            elif recent_429s >= AGGRESSIVE_429_THRESHOLD_LOW:
+                self._current_mode = "normal"
+                reason = f"Moderate 429 rate: {recent_429s} in {AGGRESSIVE_429_WINDOW_SECONDS}s (threshold: {AGGRESSIVE_429_THRESHOLD_LOW})"
+            elif self._consecutive_errors >= AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD:
+                self._current_mode = "normal"
+                reason = f"High consecutive errors: {self._consecutive_errors} (threshold: {AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD})"
+        
+        # Check for normal mode conditions
+        elif self._current_mode == "normal":
+            if recent_429s >= AGGRESSIVE_429_THRESHOLD_HIGH:
+                self._current_mode = "throttled"
+                reason = f"High 429 rate: {recent_429s} in {AGGRESSIVE_429_WINDOW_SECONDS}s (threshold: {AGGRESSIVE_429_THRESHOLD_HIGH})"
+            elif self._consecutive_errors >= AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD:
+                self._current_mode = "throttled"
+                reason = f"High consecutive errors: {self._consecutive_errors} (threshold: {AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD})"
+            # Check if we can resume aggressive mode
+            elif (recent_429s == 0 and 
+                  timestamp - self._last_success_time > AGGRESSIVE_RECOVERY_CLEAR_SECONDS and
+                  self._consecutive_errors == 0):
+                self._current_mode = "aggressive"
+                reason = f"Recovery: No 429s for {AGGRESSIVE_RECOVERY_CLEAR_SECONDS}s, consecutive errors cleared"
+        
+        # Check for throttled mode conditions
+        elif self._current_mode == "throttled":
+            # Check if we can resume aggressive mode
+            if (recent_429s == 0 and 
+                timestamp - self._last_success_time > AGGRESSIVE_RECOVERY_CLEAR_SECONDS and
+                self._consecutive_errors == 0):
+                self._current_mode = "aggressive"
+                reason = f"Recovery: No 429s for {AGGRESSIVE_RECOVERY_CLEAR_SECONDS}s, consecutive errors cleared"
+            # Maybe we can go to normal mode instead
+            elif (recent_429s < AGGRESSIVE_429_THRESHOLD_LOW and 
+                  self._consecutive_errors < AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD // 2):
+                self._current_mode = "normal"
+                reason = f"Partial recovery: 429s reduced to {recent_429s}, errors to {self._consecutive_errors}"
+        
+        # Record mode change if it happened
+        if old_mode != self._current_mode:
+            self._mode_changes.append((timestamp, old_mode, self._current_mode, reason))
+            logging.warning(f"🔄 RATE-LIMIT MODE CHANGE: {old_mode.upper()} → {self._current_mode.upper()}")
+            logging.warning(f"   Reason: {reason}")
+            return True, old_mode, self._current_mode, reason
+        
+        return False, old_mode, self._current_mode, None
+    
+    def get_sleep_time_ms(self, base_sleep_range: tuple) -> int:
+        """Get the appropriate sleep time based on current mode."""
+        if self._current_mode == "aggressive":
+            return AGGRESSIVE_SLEEP_MS
+        elif self._current_mode == "normal":
+            return random.randint(*base_sleep_range)
+        elif self._current_mode == "throttled":
+            # Use higher end of range or add extra delay
+            return max(base_sleep_range[1], base_sleep_range[1] + random.randint(200, 500))
+        else:
+            return random.randint(*base_sleep_range)
+    
+    def should_suggest_html_fallback(self) -> bool:
+        """Check if we should suggest switching to HTML mode."""
+        # Check for persistent 429s
+        if len(self._429_timestamps) > 0:
+            latest_429 = max(self._429_timestamps)
+            if time.time() - latest_429 < AGGRESSIVE_429_PERSIST_THRESHOLD:
+                recent_429s = len(self._429_timestamps)
+                if recent_429s >= AGGRESSIVE_429_THRESHOLD_HIGH:
+                    return True
+        
+        # Check for extremely high consecutive errors
+        if self._consecutive_errors >= AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD * 2:
+            return True
+        
+        return False
+    
+    def get_stats(self) -> dict:
+        """Get comprehensive rate-limit statistics."""
+        current_time = time.time()
+        recent_429s = len(self._429_timestamps)
+        
+        success_rate = (self._successful_calls / max(1, self._total_api_calls)) * 100
+        
+        return {
+            "current_mode": self._current_mode,
+            "total_api_calls": self._total_api_calls,
+            "successful_calls": self._successful_calls,
+            "success_rate": success_rate,
+            "total_429_errors": self._total_429_errors,
+            "recent_429s_60s": recent_429s,
+            "total_timeouts": self._total_timeouts,
+            "consecutive_errors": self._consecutive_errors,
+            "time_since_last_success": current_time - self._last_success_time,
+            "mode_changes_count": len(self._mode_changes),
+            "suggest_html_fallback": self.should_suggest_html_fallback(),
+            "429_rate_per_minute": (recent_429s * 60) / AGGRESSIVE_429_WINDOW_SECONDS
+        }
+    
+    def reset(self):
+        """Reset all tracking state."""
+        self._429_timestamps.clear()
+        self._last_429_window_check = time.time()
+        self._consecutive_errors = 0
+        self._last_success_time = time.time()
+        self._current_mode = "normal"
+        self._mode_changes.clear()
+        self._total_api_calls = 0
+        self._successful_calls = 0
+        self._total_429_errors = 0
+        self._total_timeouts = 0
+
+
 class ModeManager:
     """
     Manages mode switching between API and HTML with proper resource handling.
@@ -385,11 +589,12 @@ class ModeManager:
 
 
 class HybridTelemetry:
-    """Enhanced telemetry for hybrid API/HTML mode."""
+    """Enhanced telemetry for hybrid API/HTML mode with aggressive polling support."""
     
     def __init__(self, summary_interval=60):
         self.summary_interval = summary_interval
         self.last_summary_time = time.monotonic()
+        self.last_10s_log_time = time.monotonic()
         self.reset()
     
     def reset(self):
@@ -401,8 +606,17 @@ class HybridTelemetry:
         self.mode_durations = {"api": [], "html": []}
         self.last_known_id = None
         self.max_id = None
+        
+        # Aggressive mode specific metrics
+        self.aggressive_cycles = 0
+        self.normal_cycles = 0
+        self.throttled_cycles = 0
+        self.cycle_sleep_times = []  # Track actual sleep times
+        self.detection_lags = []  # Track detection latencies when new notices found
     
-    def record_cycle(self, cycle_duration, mode="unknown", api_latency=None, html_latency=None, error_occurred=False, last_known_id=None, max_id=None):
+    def record_cycle(self, cycle_duration, mode="unknown", api_latency=None, html_latency=None, 
+                   error_occurred=False, last_known_id=None, max_id=None, sleep_time_ms=None,
+                   rate_limit_mode=None, detection_lag=None):
         self.cycle_durations.append(cycle_duration)
         self.mode_durations[mode].append(cycle_duration)
         
@@ -414,11 +628,58 @@ class HybridTelemetry:
         if error_occurred:
             self.error_count += 1
             
+        if sleep_time_ms is not None:
+            self.cycle_sleep_times.append(sleep_time_ms)
+            
+        if detection_lag is not None:
+            self.detection_lags.append(detection_lag)
+            
+        # Track rate-limit mode cycles
+        if rate_limit_mode == "aggressive":
+            self.aggressive_cycles += 1
+        elif rate_limit_mode == "normal":
+            self.normal_cycles += 1
+        elif rate_limit_mode == "throttled":
+            self.throttled_cycles += 1
+            
         self.cycle_count += 1
         self.last_known_id = last_known_id
         self.max_id = max_id
     
-    def maybe_log_summary(self, mode_manager: ModeManager, failure_detector: FailureDetector):
+    def maybe_log_10s_summary(self, rate_limit_detector):
+        """Log detailed 10-second summary for aggressive mode monitoring."""
+        now = time.monotonic()
+        if now - self.last_10s_log_time < 10 or self.cycle_count == 0:
+            return
+        
+        stats = rate_limit_detector.get_stats()
+        
+        logging.info(
+            "📊 10s rate-limit window: mode=%s, api_calls=%d, success_rate=%.1f%%, "
+            "429s_60s=%d, consecutive_errors=%d, 429_rate=%.1f/min",
+            stats["current_mode"].upper(),
+            stats["total_api_calls"],
+            stats["success_rate"],
+            stats["recent_429s_60s"],
+            stats["consecutive_errors"],
+            stats["429_rate_per_minute"]
+        )
+        
+        # Sleep time statistics
+        if self.cycle_sleep_times:
+            avg_sleep = sum(self.cycle_sleep_times[-10:]) / min(len(self.cycle_sleep_times), 10)  # Last 10 cycles
+            logging.info(f"   💤 Recent avg sleep: {avg_sleep:.0f}ms")
+        
+        # Detection latency statistics
+        if self.detection_lags:
+            recent_lags = self.detection_lags[-5:]  # Last 5 detections
+            avg_lag = sum(recent_lags) / len(recent_lags)
+            logging.info(f"   ⚡ Recent detection lag: {avg_lag:.0f}ms")
+        
+        self.last_10s_log_time = now
+    
+    def maybe_log_summary(self, mode_manager: ModeManager, failure_detector: FailureDetector, 
+                        rate_limit_detector: RateLimitDetector = None):
         now = time.monotonic()
         if now - self.last_summary_time < self.summary_interval or self.cycle_count == 0:
             return
@@ -450,30 +711,66 @@ class HybridTelemetry:
         api_latency_str = f"{api_latency_avg:.3f}s" if api_latency_avg else "n/a"
         p95_str = f"{p95_cycle:.3f}s" if p95_cycle else "n/a"
         
-        logging.info(
-            "📈 60s summary: mode=%s, cycles=%d, avg_cycle=%.3fs, p95_cycle=%s, error_rate=%.2f%%, "
-            "api_cycles=%d(%s), html_cycles=%d(%s), api_latency=%s, failures=%d, transitions=%d",
-            mode_stats["current_mode"].upper(),
-            self.cycle_count,
-            avg_cycle,
-            p95_str,
-            error_rate * 100,
-            api_cycles,
-            api_avg_str,
-            html_cycles,
-            html_avg_str,
-            api_latency_str,
-            failure_stats["recent_failures"],
-            mode_stats["transition_count"]
-        )
+        # Build the main summary log
+        summary_parts = [
+            f"📈 {self.summary_interval}s summary: mode={mode_stats['current_mode'].upper()}",
+            f"cycles={self.cycle_count}",
+            f"avg_cycle={avg_cycle:.3f}s",
+            f"p95_cycle={p95_str}",
+            f"error_rate={error_rate * 100:.2f}%",
+            f"api_cycles={api_cycles}({api_avg_str})",
+            f"html_cycles={html_cycles}({html_avg_str})",
+            f"api_latency={api_latency_str}",
+            f"failures={failure_stats['recent_failures']}",
+            f"transitions={mode_stats['transition_count']}"
+        ]
         
+        # Add rate-limit stats if available
+        if rate_limit_detector:
+            rl_stats = rate_limit_detector.get_stats()
+            summary_parts.extend([
+                f"rl_mode={rl_stats['current_mode'].upper()}",
+                f"429s_60s={rl_stats['recent_429s_60s']}",
+                f"success_rate={rl_stats['success_rate']:.1f}%"
+            ])
+            
+            # Add aggressive mode breakdown
+            if self.aggressive_cycles > 0 or self.normal_cycles > 0 or self.throttled_cycles > 0:
+                summary_parts.append(
+                    f"modes=aggr:{self.aggressive_cycles}|norm:{self.normal_cycles}|throt:{self.throttled_cycles}"
+                )
+        
+        logging.info(" ".join(summary_parts))
+        
+        # Additional details
         if self.last_known_id is not None and self.max_id is not None:
+            gap = max(0, self.max_id - self.last_known_id) if self.last_known_id and self.max_id else 0
             logging.info(
                 "   📊 ID tracking: last_known=%s, max=%s, gap=%d",
-                self.last_known_id,
-                self.max_id,
-                max(0, self.max_id - self.last_known_id) if self.last_known_id and self.max_id else 0
+                self.last_known_id, self.max_id, gap
             )
+        
+        # Sleep time statistics
+        if self.cycle_sleep_times:
+            avg_sleep = sum(self.cycle_sleep_times) / len(self.cycle_sleep_times)
+            min_sleep = min(self.cycle_sleep_times)
+            max_sleep = max(self.cycle_sleep_times)
+            logging.info(
+                f"   💤 Sleep times: avg={avg_sleep:.0f}ms, min={min_sleep:.0f}ms, max={max_sleep:.0f}ms"
+            )
+        
+        # Detection latency statistics
+        if self.detection_lags:
+            avg_lag = sum(self.detection_lags) / len(self.detection_lags)
+            min_lag = min(self.detection_lags)
+            max_lag = max(self.detection_lags)
+            logging.info(
+                f"   ⚡ Detection latency: avg={avg_lag:.0f}ms, min={min_lag:.0f}ms, max={max_lag:.0f}ms"
+            )
+        
+        # HTML fallback suggestion
+        if rate_limit_detector and rate_limit_detector.should_suggest_html_fallback():
+            logging.warning("   ⚠️ SUGGESTION: Consider switching to HTML mode due to persistent rate limiting")
         
         self.reset()
         self.last_summary_time = now
@@ -2334,7 +2631,7 @@ def main_hybrid(
     mode_selection=None,
     summary_interval=60,
 ):
-    """Hybrid main loop with auto-fallback between API and HTML modes."""
+    """Hybrid main loop with auto-fallback between API and HTML modes with aggressive polling support."""
     timezone = ZoneInfo("Asia/Seoul")
     
     # Get configuration values
@@ -2342,6 +2639,7 @@ def main_hybrid(
     api_recovery_threshold, _ = get_api_recovery_ok()
     api_sleep_range, html_refresh_range, jitter_range, api_raw, html_raw, jitter_raw = get_sleep_ranges()
     autofallback_disabled = is_autofallback_disabled()
+    aggressive_mode_enabled = is_aggressive_mode_enabled()
     
     # Convert ms ranges to seconds for internal use
     api_sleep_range_sec = (api_sleep_range[0] / 1000.0, api_sleep_range[1] / 1000.0)
@@ -2352,7 +2650,13 @@ def main_hybrid(
     initial_mode = mode_selection.mode if mode_selection else DEFAULT_MODE
     mode_manager = ModeManager(initial_mode, not autofallback_disabled)
     failure_detector = FailureDetector(api_error_threshold, api_recovery_threshold)
+    rate_limit_detector = RateLimitDetector()
     telemetry = HybridTelemetry(summary_interval=summary_interval)
+    
+    # Set initial rate-limit mode
+    if aggressive_mode_enabled and initial_mode == "api":
+        rate_limit_detector._current_mode = "aggressive"
+        logging.warning("⚠️ AGGRESSIVE MODE: 200ms polling — high risk of rate-limit")
     
     # Initialize resources for initial mode
     if initial_mode == "api":
@@ -2371,14 +2675,24 @@ def main_hybrid(
     logging.info("📡 Режим: ГИБРИДНЫЙ (API + HTML с авто-фоллбэком)")
     logging.info("   • Initial mode: %s", initial_mode.upper())
     logging.info("   • Auto-fallback: %s", "DISABLED" if autofallback_disabled else "ENABLED")
+    logging.info("   • Aggressive mode: %s", "ENABLED" if aggressive_mode_enabled else "DISABLED")
+    if aggressive_mode_enabled:
+        logging.info("   • Rate-limit thresholds: %d/%d 429s in %ds, %d consecutive errors", 
+                    AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH, 
+                    AGGRESSIVE_429_WINDOW_SECONDS, AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD)
     logging.info("   • Timezone: Asia/Seoul")
     logging.info("   • ID tracking file: %s", LAST_NOTICE_FILE)
     logging.info("")
     
     logging.info("⚙️ API Configuration:")
     logging.info("   • Endpoint: https://api-manager.upbit.com/api/v1/announcements")
-    logging.info("   • Sleep cycle: %d-%dms + jitter %d-%dms", 
-                 api_sleep_range[0], api_sleep_range[1], jitter_range[0], jitter_range[1])
+    if aggressive_mode_enabled:
+        logging.info("   • Aggressive polling: %dms (fixed)", AGGRESSIVE_SLEEP_MS)
+        logging.info("   • Auto-backoff: 500ms at %d 429s, 1000ms at %d 429s", 
+                    AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH)
+    else:
+        logging.info("   • Sleep cycle: %d-%dms + jitter %d-%dms", 
+                     api_sleep_range[0], api_sleep_range[1], jitter_range[0], jitter_range[1])
     logging.info("   • Failure threshold: %d errors", api_error_threshold)
     logging.info("   • Recovery threshold: %d successes", api_recovery_threshold)
     if api_raw:
@@ -2399,6 +2713,7 @@ def main_hybrid(
     logging.info("")
     
     cycle = 0
+    last_detection_time = None
     
     try:
         while True:
@@ -2416,16 +2731,27 @@ def main_hybrid(
             last_known_id = None
             max_id = None
             new_ids = []
+            detection_lag = None
             
             try:
                 if mode_manager.current_mode == "api":
-                    # API MODE
+                    # API MODE with aggressive polling support
+                    api_call_start = time.perf_counter()
                     notices, metadata = get_notices_via_api(mode_manager.api_session, return_metadata=True)
                     api_latency = metadata.get("latency")
                     error_message = metadata.get("error")
                     status = metadata.get("status", "unknown")
+                    status_code = metadata.get("status_code")
                     
                     error_occurred = bool(error_message) or status == "error"
+                    
+                    # Record API call for rate-limit detection
+                    mode_changed, old_mode, new_mode, reason = rate_limit_detector.record_api_call(
+                        success=not error_occurred,
+                        status_code=status_code,
+                        error_message=error_message,
+                        timestamp=time.time()
+                    )
                     
                     # Process notices if successful
                     if not error_occurred and notices:
@@ -2433,6 +2759,13 @@ def main_hybrid(
                         last_known_id = metrics.get("last_known_id")
                         max_id = metrics.get("max_id")
                         new_ids = metrics.get("new_ids") or []
+                        
+                        # Calculate detection lag if we have new notices
+                        if new_ids and last_detection_time:
+                            detection_lag = (current_kst - last_detection_time).total_seconds() * 1000
+                            last_detection_time = current_kst
+                        elif new_ids:
+                            last_detection_time = current_kst
                     
                     # Record API result for failure detection
                     should_fallback, failure_count = failure_detector.record_api_result(
@@ -2447,10 +2780,16 @@ def main_hybrid(
                         
                         if mode_manager.switch_to_html(reason, failure_count):
                             failure_detector.reset()  # Reset failure detector after switch
+                            rate_limit_detector.reset()  # Reset rate-limit detector
                             # Continue with HTML mode in this cycle
                             mode_manager.current_mode = "html"
                         else:
                             logging.warning("⚠️ Failed to switch to HTML mode, continuing with API")
+                    
+                    # Check if rate-limit detector suggests HTML fallback
+                    if rate_limit_detector.should_suggest_html_fallback():
+                        logging.warning("⚠️ RATE-LIMIT DETECTOR suggests considering HTML mode due to persistent 429s")
+                        logging.warning("   → Run with --html flag to force HTML mode if rate limiting continues")
                 
                 if mode_manager.current_mode == "html":
                     # HTML MODE
@@ -2482,6 +2821,11 @@ def main_hybrid(
                             
                             if new_ids:
                                 logging.info(f"🔔 HTML mode: {len(new_ids)} новых новостей → ID: {new_ids}")
+                                
+                                # Calculate detection lag
+                                if last_detection_time:
+                                    detection_lag = (current_kst - last_detection_time).total_seconds() * 1000
+                                last_detection_time = current_kst
                                 
                                 # Send notifications (simulated for HTML mode)
                                 for notice_id in new_ids:
@@ -2518,9 +2862,22 @@ def main_hybrid(
                             reason = f"API recovered after {api_recovery_threshold} successful checks"
                             if mode_manager.switch_to_api(reason):
                                 failure_detector.reset()
+                                rate_limit_detector.reset()
                 
                 # Record cycle metrics
                 cycle_duration = time.perf_counter() - cycle_start
+                
+                # Determine sleep time based on rate-limit mode
+                if mode_manager.current_mode == "api" and aggressive_mode_enabled:
+                    sleep_time_ms = rate_limit_detector.get_sleep_time_ms(api_sleep_range)
+                    rate_limit_mode = rate_limit_detector._current_mode
+                elif mode_manager.current_mode == "api":
+                    sleep_time_ms = random.randint(*api_sleep_range)
+                    rate_limit_mode = "normal"
+                else:
+                    sleep_time_ms = random.randint(*html_refresh_range)
+                    rate_limit_mode = "html"
+                
                 telemetry.record_cycle(
                     cycle_duration=cycle_duration,
                     mode=mode_manager.current_mode,
@@ -2528,49 +2885,76 @@ def main_hybrid(
                     html_latency=html_latency,
                     error_occurred=error_occurred,
                     last_known_id=last_known_id,
-                    max_id=max_id
+                    max_id=max_id,
+                    sleep_time_ms=sleep_time_ms,
+                    rate_limit_mode=rate_limit_mode,
+                    detection_lag=detection_lag
                 )
                 
-                # Log cycle information
+                # Log cycle information with enhanced metrics
                 latency_str = f"{api_latency:.3f}s" if api_latency is not None else "n/a"
                 html_latency_str = f"{html_latency:.3f}s" if html_latency is not None else "n/a"
                 total_notices = len(notices) if notices else (len(new_ids) if new_ids else 0)
                 new_ids_display = new_ids if new_ids else "-"
                 
-                logging.info(
-                    "🔄 Cycle #%d | ts_kst=%s | mode=%s | status=%s | cycle=%.3fs | api=%s | html=%s | notices=%d | max_id=%s | last_known=%s | new_ids=%s",
-                    cycle,
-                    timestamp_str,
-                    mode_manager.current_mode.upper(),
-                    "error" if error_occurred else "ok",
-                    cycle_duration,
-                    latency_str,
-                    html_latency_str,
-                    total_notices,
-                    max_id if max_id is not None else "-",
-                    last_known_id if last_known_id is not None else "-",
-                    new_ids_display,
-                )
-                
-                # Log telemetry summary
-                telemetry.maybe_log_summary(mode_manager, failure_detector)
-                
-                # Sleep with jitter based on current mode
-                if mode_manager.current_mode == "api":
-                    base_sleep = random.uniform(*api_sleep_range_sec)
+                # Enhanced logging for aggressive mode
+                if aggressive_mode_enabled and mode_manager.current_mode == "api":
+                    rl_stats = rate_limit_detector.get_stats()
+                    logging.info(
+                        "🔄 Cycle #%d | ts_kst=%s | mode=%s | rl_mode=%s | status=%s | cycle=%.3fs | api=%s | sleep=%dms | notices=%d | max_id=%s | new_ids=%s | 429s_60s=%d",
+                        cycle,
+                        timestamp_str,
+                        mode_manager.current_mode.upper(),
+                        rl_stats["current_mode"].upper(),
+                        "error" if error_occurred else "ok",
+                        cycle_duration,
+                        latency_str,
+                        sleep_time_ms,
+                        total_notices,
+                        max_id if max_id is not None else "-",
+                        last_known_id if last_known_id is not None else "-",
+                        new_ids_display,
+                        rl_stats["recent_429s_60s"]
+                    )
                 else:
-                    base_sleep = random.uniform(*html_refresh_range_sec)
+                    logging.info(
+                        "🔄 Cycle #%d | ts_kst=%s | mode=%s | status=%s | cycle=%.3fs | api=%s | html=%s | notices=%d | max_id=%s | last_known=%s | new_ids=%s",
+                        cycle,
+                        timestamp_str,
+                        mode_manager.current_mode.upper(),
+                        "error" if error_occurred else "ok",
+                        cycle_duration,
+                        latency_str,
+                        html_latency_str,
+                        total_notices,
+                        max_id if max_id is not None else "-",
+                        last_known_id if last_known_id is not None else "-",
+                        new_ids_display,
+                    )
                 
-                jitter = random.uniform(*jitter_range_sec)
-                sleep_time = max(0.0, base_sleep + jitter)
+                # Log telemetry summaries
+                telemetry.maybe_log_summary(mode_manager, failure_detector, rate_limit_detector)
+                if aggressive_mode_enabled:
+                    telemetry.maybe_log_10s_summary(rate_limit_detector)
+                
+                # Sleep with appropriate timing
+                sleep_time_sec = sleep_time_ms / 1000.0
+                
+                if aggressive_mode_enabled and mode_manager.current_mode == "api":
+                    # In aggressive mode, minimal jitter for consistency
+                    jitter = random.uniform(0, 10) / 1000.0  # 0-10ms jitter
+                else:
+                    jitter = random.uniform(*jitter_range_sec)
+                
+                final_sleep_time = max(0.0, sleep_time_sec + jitter)
                 
                 logging.debug(
                     "💤 Сон %.0fms (base %.0fms + jitter %.0fms)",
-                    sleep_time * 1000,
-                    base_sleep * 1000,
+                    final_sleep_time * 1000,
+                    sleep_time_ms,
                     jitter * 1000,
                 )
-                time.sleep(sleep_time)
+                time.sleep(final_sleep_time)
                 
             except Exception as cycle_error:
                 logging.error("❌ Неожиданная ошибка в цикле #%d: %s", cycle, cycle_error)
@@ -2584,7 +2968,7 @@ def main_hybrid(
                     error_occurred=True
                 )
                 
-                telemetry.maybe_log_summary(mode_manager, failure_detector)
+                telemetry.maybe_log_summary(mode_manager, failure_detector, rate_limit_detector)
                 time.sleep(1)
     
     except KeyboardInterrupt:
@@ -2969,6 +3353,7 @@ if __name__ == "__main__":
     api_recovery_threshold, raw_recovery = get_api_recovery_ok()
     api_sleep_range, html_refresh_range, jitter_range, api_raw, html_raw, jitter_raw = get_sleep_ranges()
     autofallback_disabled = is_autofallback_disabled()
+    aggressive_mode_enabled = is_aggressive_mode_enabled()
     
     # Log API error threshold
     if raw_threshold is not None:
@@ -3032,6 +3417,16 @@ if __name__ == "__main__":
     logging.info("   Jitter range: %d-%dms %s",
                  jitter_range[0], jitter_range[1],
                  f"(override: {jitter_raw})" if jitter_raw else "(default)")
+    
+    # Log aggressive mode status
+    if aggressive_mode_enabled:
+        logging.info("   Aggressive mode: ENABLED (%s=true)", AGGRESSIVE_MODE_ENV)
+        logging.warning("⚠️ AGGRESSIVE MODE: 200ms polling — high risk of rate-limit")
+        logging.info("   • Auto-backoff: 500ms at %d 429s, 1000ms at %d 429s", 
+                    AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH)
+        logging.info("   • Recovery: Resume aggressive after %ds of no 429s", AGGRESSIVE_RECOVERY_CLEAR_SECONDS)
+    else:
+        logging.info("   Aggressive mode: DISABLED (%s not set or false)", AGGRESSIVE_MODE_ENV)
     
     # Log auto-fallback status
     if autofallback_disabled:
