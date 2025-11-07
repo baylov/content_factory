@@ -384,7 +384,8 @@ class RateLimitDetector:
             self._429_timestamps.append(timestamp)
             self._total_429_errors += 1
             self._consecutive_errors += 1
-            logging.warning(f"🚫 429 Rate Limit detected (consecutive: {self._consecutive_errors})")
+            recent_429s = len(self._429_timestamps)
+            logging.warning(f"⚠️ 429 RATE LIMIT DETECTED (consecutive: {self._consecutive_errors}, 60s window: {recent_429s})")
             
         elif is_timeout:
             self._total_timeouts += 1
@@ -462,6 +463,9 @@ class RateLimitDetector:
         # Record mode change if it happened
         if old_mode != self._current_mode:
             self._mode_changes.append((timestamp, old_mode, self._current_mode, reason))
+            # Special alert for hitting 20+ 429s threshold
+            if recent_429s >= AGGRESSIVE_429_THRESHOLD_HIGH:
+                logging.warning(f"⚠️ 429 RATE LIMIT ALERT: {recent_429s} errors in {AGGRESSIVE_429_WINDOW_SECONDS}s (threshold: {AGGRESSIVE_429_THRESHOLD_HIGH})")
             logging.warning(f"🔄 RATE-LIMIT MODE CHANGE: {old_mode.upper()} → {self._current_mode.upper()}")
             logging.warning(f"   Reason: {reason}")
             return True, old_mode, self._current_mode, reason
@@ -2809,7 +2813,7 @@ def main_hybrid(
     # Set initial rate-limit mode
     if aggressive_mode_enabled and initial_mode == "api":
         rate_limit_detector._current_mode = "aggressive"
-        logging.warning("⚠️ AGGRESSIVE MODE: 200ms polling — high risk of rate-limit")
+        logging.warning("⚠️ AGGRESSIVE MODE: 50ms polling — EXTREME risk of rate-limit! Continue anyway until banned.")
     
     # Initialize resources for initial mode
     if initial_mode == "api":
@@ -3045,29 +3049,27 @@ def main_hybrid(
                 )
                 
                 # Log cycle information with enhanced metrics
+                cycle_ms = cycle_duration * 1000  # Convert to milliseconds
+                api_response_ms = (api_latency * 1000) if api_latency is not None else None
                 latency_str = f"{api_latency:.3f}s" if api_latency is not None else "n/a"
                 html_latency_str = f"{html_latency:.3f}s" if html_latency is not None else "n/a"
                 total_notices = len(notices) if notices else (len(new_ids) if new_ids else 0)
+                new_ids_count = len(new_ids) if new_ids else 0
                 new_ids_display = new_ids if new_ids else "-"
                 
                 # Enhanced logging for aggressive mode
                 if aggressive_mode_enabled and mode_manager.current_mode == "api":
                     rl_stats = rate_limit_detector.get_stats()
                     logging.info(
-                        "🔄 Cycle #%d | ts_kst=%s | mode=%s | rl_mode=%s | status=%s | cycle=%.3fs | api=%s | sleep=%dms | notices=%d | max_id=%s | new_ids=%s | 429s_60s=%d",
+                        "🔄 Cycle #%d | cycle_ms=%.1f | api_ms=%s | new_ids=%d | status=%s | sleep=%dms | 429s_60s=%d | rl_mode=%s",
                         cycle,
-                        timestamp_str,
-                        mode_manager.current_mode.upper(),
-                        rl_stats["current_mode"].upper(),
+                        cycle_ms,
+                        f"{api_response_ms:.1f}" if api_response_ms is not None else "n/a",
+                        new_ids_count,
                         "error" if error_occurred else "ok",
-                        cycle_duration,
-                        latency_str,
                         sleep_time_ms,
-                        total_notices,
-                        max_id if max_id is not None else "-",
-                        last_known_id if last_known_id is not None else "-",
-                        new_ids_display,
-                        rl_stats["recent_429s_60s"]
+                        rl_stats["recent_429s_60s"],
+                        rl_stats["current_mode"].upper()
                     )
                 else:
                     logging.info(
@@ -3094,8 +3096,8 @@ def main_hybrid(
                 sleep_time_sec = sleep_time_ms / 1000.0
                 
                 if aggressive_mode_enabled and mode_manager.current_mode == "api":
-                    # In aggressive mode, minimal jitter for consistency
-                    jitter = random.uniform(0, 10) / 1000.0  # 0-10ms jitter
+                    # In 50ms aggressive mode, NO jitter - flat interval for maximum consistency
+                    jitter = 0.0
                 else:
                     jitter = random.uniform(*jitter_range_sec)
                 
@@ -3574,8 +3576,8 @@ if __name__ == "__main__":
     # Log aggressive mode status
     if aggressive_mode_enabled:
         logging.info("   Aggressive mode: ENABLED (%s=true)", AGGRESSIVE_MODE_ENV)
-        logging.warning("⚠️ AGGRESSIVE MODE: 200ms polling — high risk of rate-limit")
-        logging.info("   • Auto-backoff: 500ms at %d 429s, 1000ms at %d 429s", 
+        logging.warning("⚠️ AGGRESSIVE MODE: 50ms polling — EXTREME risk of rate-limit! Continue anyway until banned.")
+        logging.info("   • Auto-backoff: 500ms at %d 429s, 1000ms at %d 429s",
                     AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH)
         logging.info("   • Recovery: Resume aggressive after %ds of no 429s", AGGRESSIVE_RECOVERY_CLEAR_SECONDS)
     else:
