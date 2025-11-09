@@ -15,10 +15,11 @@ import time
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from main import (
-    create_api_session, 
-    get_notices_via_api, 
-    get_last_max_id, 
-    save_max_id
+    create_api_session,
+    get_notices_via_api,
+    get_last_max_id,
+    save_max_id,
+    UPBIT_API_PER_PAGE,
 )
 
 
@@ -41,7 +42,7 @@ def test_api_fetch(session):
     
     assert notices is not None, "API вернул None"
     assert len(notices) > 0, "API не вернул новости"
-    assert len(notices) == 20, f"Ожидалось 20 новостей, получено {len(notices)}"
+    assert len(notices) == UPBIT_API_PER_PAGE, f"Ожидалось {UPBIT_API_PER_PAGE} новостей, получено {len(notices)}"
     
     print(f"   ✅ Получено {len(notices)} новостей за {elapsed:.3f}s")
     
@@ -152,8 +153,8 @@ def test_no_filtering():
     session = create_api_session()
     notices = get_notices_via_api(session)
     
-    # Проверяем что получили ровно 20 новостей (per_page=20)
-    assert len(notices) == 20, f"Должно быть 20 новостей, получено {len(notices)}"
+    # Проверяем что получили ровно UPBIT_API_PER_PAGE новостей (per_page=20)
+    assert len(notices) == UPBIT_API_PER_PAGE, f"Должно быть {UPBIT_API_PER_PAGE} новостей, получено {len(notices)}"
     
     # Проверяем что есть новости разных категорий
     categories = set(n["category"] for n in notices)
