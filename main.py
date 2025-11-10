@@ -2300,16 +2300,18 @@ def send_telegram_notification(title, link, detection_time=None, processing_comp
 
 def get_random_delay():
     """
-    Возвращает случайную задержку между 0.5 и 1.5 секундами для имитации человека
+    Возвращает минимальную задержку для агрессивного polling (убрана имитация человека)
     """
-    return random.uniform(0.5, 1.5)
+    return 0.0  # No delay for aggressive polling
 
 
 def get_refresh_interval():
     """
-    Возвращает случайный интервал между refresh (1-2 секунды)
+    Возвращает случайный интервал между refresh на основе конфигурации HTML_REFRESH_MS
     """
-    return random.uniform(1.0, 2.0)
+    _, html_range, _, _, _, _ = get_sleep_ranges()
+    # Convert milliseconds to seconds and add small random variation
+    return random.uniform(html_range[0] / 1000.0, html_range[1] / 1000.0)
 
 
 def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
@@ -3252,23 +3254,22 @@ def main():
     
     # CDP API отключён - используем только HTML парсинг
     known_endpoints = []
-    use_cdp = False  # CDP API временно отключён
+    use_cdp = False  # CDP API отключён - HTML режим основной
     
-    logging.info("📡 Режим: ОПТИМИЗИРОВАННЫЙ HTML ПАРСИНГ")
-    logging.info("  ✓ CDP API отключён (временно)")
-    logging.info("  ✓ Прямой HTML парсинг")
-    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 1.5 секунды")
+    logging.info("📡 Режим: АГРЕССИВНЫЙ HTML ПАРСИНГ (STEALTH)")
+    logging.info("  ✓ API режим отключён (9+ сек задержка)")
+    logging.info("  ✓ HTML парсинг с Selenium + STEALTH")
+    logging.info("  🎯 ЦЕЛЕВАЯ СКОРОСТЬ: < 2 секунды")
     logging.info("")
-    logging.info("🔄 Интервал проверки: 1-2 секунды")
+    logging.info("⚡ АГРЕССИВНЫЙ POLLING: 50-100ms между циклами")
     logging.info("")
     logging.info("⚡ ОПТИМИЗАЦИИ:")
-    logging.info("  ✓ Selenium headless Chrome с STEALTH")
+    logging.info("  ✓ Selenium headless Chrome с STEALTH режимом")
     logging.info("  ✓ Отключены изображения, CSS, media")
     logging.info("  ✓ page_load_strategy='eager'")
-    logging.info("  ✓ Lightweight readiness probe (document state + visibility)")
+    logging.info("  ✓ Минимальные задержки (50-100ms)")
     logging.info("  ✓ Быстрая проверка сразу после refresh")
     logging.info("  ✓ Умное ожидание (polling 20ms, max 0.3s)")
-    logging.info("  ✓ Consecutive stable samples tracking")
     logging.info("  ✓ Быстрый HTML парсинг")
     logging.info("  ✓ Автодиагностика при ошибках")
     logging.info("  ✓ Детальные метрики на каждом этапе")
@@ -3293,10 +3294,6 @@ def main():
                 logging.warning("⚠️ API endpoints не обнаружены, используем HTML fallback")
         except Exception as discovery_error:
             logging.warning(f"⚠️ Ошибка обнаружения API: {discovery_error}")
-    
-    # Переменная для отслеживания 429 ошибок
-    rate_limit_backoff = 0  # Дополнительная задержка при 429
-    last_429_time = None
     
     try:
         # Первая загрузка с подробным логированием времени
@@ -3413,7 +3410,7 @@ def main():
             logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
             
             # Отправляем уведомления для каждой новой новости
-            notify_about_new_ids(driver, new_ids, pause_between=0.5)
+            notify_about_new_ids(driver, new_ids, pause_between=0.1)
             
             # Обновляем max_id
             save_max_id(page_max_id)
@@ -3431,18 +3428,18 @@ def main():
         current_max_id = tracked_max_id
         refresh_count = 0
         
-        logging.info("🔄 Начинаем polling с refresh каждые 1-2 секунды...")
+        logging.info("🔄 Начинаем агрессивный polling с refresh каждые 50-100ms...")
         
         while True:
             try:
-                # Вычисляем интервал для следующего refresh
-                base_interval = get_refresh_interval()  # 1-2 секунды
-                human_delay = get_random_delay()  # 0.5-1.5 секунды
+                # Вычисляем интервал для следующего refresh (50-100ms)
+                base_interval = get_refresh_interval()  # 50-100ms from config
+                human_delay = get_random_delay()  # 0ms for aggressive polling
                 
-                # Добавляем backoff если была 429 ошибка
-                total_delay = base_interval + human_delay + rate_limit_backoff
+                # Total delay = base_interval only (no backoff for aggressive mode)
+                total_delay = base_interval + human_delay
                 
-                logging.debug(f"💤 Ожидание {total_delay:.2f}с (base: {base_interval:.2f}s, random: {human_delay:.2f}s, backoff: {rate_limit_backoff:.2f}s)")
+                logging.debug(f"💤 Ожидание {total_delay*1000:.0f}ms (base: {base_interval*1000:.0f}ms)")
                 time.sleep(total_delay)
 
                 # Время начала refresh
@@ -3483,12 +3480,6 @@ def main():
                     else:
                         logging.error(f"  ❌ {method} MODE: Получено за {total_cycle_time:.3f}s")
                     
-                    # Сбрасываем backoff если цикл успешен
-                    if rate_limit_backoff > 0:
-                        logging.info("✅ Цикл успешен, сбрасываем backoff")
-                        rate_limit_backoff = 0
-                        last_429_time = None
-                    
                 except TimeoutException:
                     logging.warning("⚠️ Timeout при загрузке, пропускаем цикл")
                     continue
@@ -3516,7 +3507,7 @@ def main():
                     logging.info(f"🔔 Новых новостей: {len(new_ids)} → ID: {new_ids}")
                     
                     # Отправляем уведомления
-                    notify_about_new_ids(driver, new_ids, detection_start=detection_time, pause_between=0.5)
+                    notify_about_new_ids(driver, new_ids, detection_start=detection_time, pause_between=0.1)
                     
                     # Обновляем текущий max_id
                     current_max_id = page_max_id
@@ -3529,11 +3520,9 @@ def main():
             except WebDriverException as e:
                 error_msg = str(e).lower()
                 
-                # Проверяем на 429 ошибку
+                # Проверяем на 429 ошибку - логируем но продолжаем агрессивный polling
                 if '429' in error_msg or 'rate limit' in error_msg or 'too many requests' in error_msg:
-                    rate_limit_backoff = random.uniform(10, 30)
-                    last_429_time = datetime.now(ZoneInfo("Asia/Seoul"))
-                    logging.error(f"❌ Обнаружена 429 ошибка! Увеличиваем задержку на {rate_limit_backoff:.1f}с")
+                    logging.warning(f"⚠️ Обнаружена 429 ошибка - продолжаем работу (stealth режим)")
                     continue
                 
                 # Проверяем на session error
@@ -3561,7 +3550,7 @@ def main():
                             new_ids = [nid for nid in all_ids if nid > current_max_id]
                             new_ids.sort()
                             detection_start = datetime.now(ZoneInfo("Asia/Seoul"))
-                            notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.5)
+                            notify_about_new_ids(driver, new_ids, detection_start=detection_start, pause_between=0.1)
                             current_max_id = page_max_id
                             save_max_id(current_max_id)
                         else:
