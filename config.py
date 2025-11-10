@@ -25,13 +25,13 @@ SUMMARY_INTERVAL_SECONDS = 60
 API_IDLE_BASE_RANGE: Tuple[float, float] = (0.1, 0.3)
 API_IDLE_JITTER_RANGE: Tuple[float, float] = (0.02, 0.04)
 
-# Aggressive mode settings
-AGGRESSIVE_SLEEP_MS = 200  # Fixed 200ms for aggressive mode
-AGGRESSIVE_429_THRESHOLD_LOW = 10  # Backoff to 500ms at 10 429s in 60s
-AGGRESSIVE_429_THRESHOLD_HIGH = 20  # Backoff to 1000ms at 20 429s in 60s
+# Aggressive mode settings - optimized for <1 second polling
+AGGRESSIVE_SLEEP_MS = 50  # Fixed 50ms for ultra-aggressive mode (20 requests/sec)
+AGGRESSIVE_429_THRESHOLD_LOW = 15  # Backoff to 200ms at 15 429s in 60s
+AGGRESSIVE_429_THRESHOLD_HIGH = 30  # Backoff to 500ms at 30 429s in 60s
 AGGRESSIVE_429_WINDOW_SECONDS = 60  # Rolling window for 429 detection
 AGGRESSIVE_RECOVERY_CLEAR_SECONDS = 300  # 5 minutes of no 429s to resume aggressive
-AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD = 50  # Backoff at 50 consecutive errors
+AGGRESSIVE_CONSECUTIVE_ERROR_THRESHOLD = 100  # Backoff at 100 consecutive errors
 AGGRESSIVE_429_PERSIST_THRESHOLD = 600  # 10 minutes of 429s suggests HTML fallback
 
 

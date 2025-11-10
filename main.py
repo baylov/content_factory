@@ -471,12 +471,13 @@ class RateLimitDetector:
     def get_sleep_time_ms(self, base_sleep_range: tuple) -> int:
         """Get the appropriate sleep time based on current mode."""
         if self._current_mode == "aggressive":
-            return AGGRESSIVE_SLEEP_MS
+            return AGGRESSIVE_SLEEP_MS  # 50ms for ultra-aggressive polling
         elif self._current_mode == "normal":
-            return random.randint(*base_sleep_range)
+            # 200ms base for normal mode (4x slower than aggressive)
+            return random.randint(150, 250)
         elif self._current_mode == "throttled":
-            # Use higher end of range or add extra delay
-            return max(base_sleep_range[1], base_sleep_range[1] + random.randint(200, 500))
+            # 500ms for throttled mode (10x slower than aggressive)
+            return random.randint(400, 600)
         else:
             return random.randint(*base_sleep_range)
     
@@ -2841,8 +2842,9 @@ def process_new_notices(notices, session):
                     logging.info(f"[save_max_id] Сохранён max_id: {notice_id}")
                 except Exception as e:
                     logging.error(f"[save_max_id] Ошибка сохранения max_id {notice_id}: {e}")
+            # Minimal delay between notices (only 50ms to avoid overwhelming Telegram)
             if len(new_notices) > 1:
-                time.sleep(0.5)
+                time.sleep(0.05)
 
         # Final save of max_id to ensure it's updated
         try:
@@ -2947,7 +2949,7 @@ def main_hybrid(
     # Set initial rate-limit mode
     if aggressive_mode_enabled and initial_mode == "api":
         rate_limit_detector._current_mode = "aggressive"
-        logging.warning("⚠️ AGGRESSIVE MODE: 200ms polling — high risk of rate-limit")
+        logging.warning("⚠️ AGGRESSIVE MODE: 50ms polling (20 req/s) — optimized for <1s latency")
     
     # Initialize resources for initial mode
     if initial_mode == "api":
@@ -2978,9 +2980,9 @@ def main_hybrid(
     logging.info("⚙️ API Configuration:")
     logging.info("   • Endpoint: https://api-manager.upbit.com/api/v1/announcements")
     if aggressive_mode_enabled:
-        logging.info("   • Aggressive polling: %dms (fixed)", AGGRESSIVE_SLEEP_MS)
-        logging.info("   • Auto-backoff: 500ms at %d 429s, 1000ms at %d 429s", 
-                    AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH)
+        logging.info("   • Aggressive polling: %dms (fixed) = 20 requests/sec", AGGRESSIVE_SLEEP_MS)
+        logging.info("   • Auto-backoff: 200ms at %d 429s, 500ms at %d 429s (recovery: %ds no-429s)",
+                    AGGRESSIVE_429_THRESHOLD_LOW, AGGRESSIVE_429_THRESHOLD_HIGH, AGGRESSIVE_RECOVERY_CLEAR_SECONDS)
     else:
         logging.info("   • Sleep cycle: %d-%dms + jitter %d-%dms", 
                      api_sleep_range[0], api_sleep_range[1], jitter_range[0], jitter_range[1])
@@ -3232,8 +3234,8 @@ def main_hybrid(
                 sleep_time_sec = sleep_time_ms / 1000.0
                 
                 if aggressive_mode_enabled and mode_manager.current_mode == "api":
-                    # In aggressive mode, minimal jitter for consistency
-                    jitter = random.uniform(0, 10) / 1000.0  # 0-10ms jitter
+                    # In aggressive mode, ultra-minimal jitter for consistency
+                    jitter = random.uniform(0, 5) / 1000.0  # 0-5ms jitter only
                 else:
                     jitter = random.uniform(*jitter_range_sec)
                 
