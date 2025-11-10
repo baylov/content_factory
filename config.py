@@ -18,7 +18,7 @@ AGGRESSIVE_MODE_ENV = "UPBIT_AGGRESSIVE_MODE"
 
 DEFAULT_API_ERROR_THRESHOLD = 5
 DEFAULT_API_RECOVERY_OK = 20
-DEFAULT_API_SLEEP_MS = (100, 300)  # Base sleep range in ms
+DEFAULT_API_SLEEP_MS = (50, 100)  # Base sleep range in ms - optimized for <1s detection latency
 DEFAULT_HTML_REFRESH_MS = (800, 1200)  # HTML refresh range in ms
 DEFAULT_JITTER_MS = (20, 40)  # Jitter range in ms
 SUMMARY_INTERVAL_SECONDS = 60
