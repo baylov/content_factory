@@ -870,7 +870,7 @@ UPBIT_NOTICE_URL = "https://upbit.com/service_center/notice"
 LAST_NOTICE_FILE = "last_notice.txt"
 UPBIT_API_URL = "https://api-manager.upbit.com/api/v1/announcements"
 UPBIT_API_PER_PAGE = 20
-UPBIT_API_MAX_PAGES = 3
+UPBIT_API_MAX_PAGES = 1
 
 
 def init_driver(enable_cdp=False):
@@ -2472,12 +2472,12 @@ def create_api_session():
 
 def get_notices_via_api(session, return_metadata=False, *, max_pages=UPBIT_API_MAX_PAGES):
     """
-    Получение новостей через Upbit API с пагинацией по нескольким страницам.
+    Получение новостей через Upbit API (только page 1, без пагинации).
     
     Args:
         session: requests.Session с retry механизмом
         return_metadata: Вернуть подробные метаданные (latency, error)
-        max_pages: Максимальное количество страниц для проверки (по умолчанию 3)
+        max_pages: Максимальное количество страниц для проверки (всегда 1)
     
     Returns:
         List[Dict] или Tuple[List[Dict], Dict]: Список новостей или кортеж при return_metadata=True
@@ -2503,130 +2503,108 @@ def get_notices_via_api(session, return_metadata=False, *, max_pages=UPBIT_API_M
     aggregated_notices: Dict[int, Dict] = {}
     new_ids_detected = set()
     
-    for page in range(1, max_pages + 1):
-        params = {
-            "os": "web",
-            "page": page,
-            "per_page": UPBIT_API_PER_PAGE,
-            "category": "all"
-        }
-        page_start = time.perf_counter()
-        
-        try:
-            response = session.get(UPBIT_API_URL, params=params, headers=headers, timeout=5)
-        except requests.Timeout:
-            elapsed = time.perf_counter() - start_time
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "error": "timeout",
-            })
-            logging.error(f"⏱️ API timeout после {elapsed:.3f}s (page {page})")
-            return ([], metadata) if return_metadata else []
-        except requests.ConnectionError as e:
-            elapsed = time.perf_counter() - start_time
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "error": f"connection_error: {e}",
-            })
-            logging.error(f"🔌 Connection error после {elapsed:.3f}s (page {page}): {e}")
-            return ([], metadata) if return_metadata else []
-        except Exception as e:
-            elapsed = time.perf_counter() - start_time
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "error": f"unexpected: {e}",
-            })
-            logging.error(f"❌ API error после {elapsed:.3f}s (page {page}): {e}")
-            return ([], metadata) if return_metadata else []
-        
-        metadata["total_requests"] += 1
-        metadata["status_code"] = response.status_code
-        
-        try:
-            response.raise_for_status()
-        except requests.HTTPError as e:
-            elapsed = time.perf_counter() - start_time
-            status_code = e.response.status_code if e.response else response.status_code
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "status_code": status_code,
-                "error": f"http_{status_code}",
-            })
-            logging.error(f"❌ HTTP {status_code} после {elapsed:.3f}s (page {page}): {e}")
-            return ([], metadata) if return_metadata else []
-        
-        try:
-            data = response.json()
-        except ValueError as e:
-            elapsed = time.perf_counter() - start_time
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "error": f"invalid_json: {e}",
-            })
-            logging.error(f"❌ Невалидный JSON после {elapsed:.3f}s (page {page}): {e}")
-            return ([], metadata) if return_metadata else []
-        
-        page_latency = time.perf_counter() - page_start
-        
-        if not data.get("success"):
-            elapsed = time.perf_counter() - start_time
-            metadata.update({
-                "latency": elapsed,
-                "status": "error",
-                "error": "success=false",
-            })
-            logging.error("❌ API returned success=false на странице %d", page)
-            return ([], metadata) if return_metadata else []
-        
-        notices = data.get("data", {}).get("notices", [])
-        ids = [notice.get("id") for notice in notices if notice.get("id") is not None]
-        metadata["pages_checked"].append({
-            "page": page,
-            "count": len(notices),
-            "ids": ids,
-            "duration": page_latency,
+    page = 1
+    params = {
+        "os": "web",
+        "page": page,
+        "per_page": UPBIT_API_PER_PAGE,
+        "category": "all"
+    }
+    page_start = time.perf_counter()
+    
+    try:
+        response = session.get(UPBIT_API_URL, params=params, headers=headers, timeout=5)
+    except requests.Timeout:
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": "timeout",
         })
-        
-        logging.info(
-            "📄 API page %d: %d новостей → ID: %s",
-            page,
-            len(notices),
-            ids,
-        )
-        
-        for notice in notices:
-            notice_id = notice.get("id")
-            if notice_id is None:
-                continue
-            aggregated_notices[notice_id] = notice
-            if last_known_id is not None and notice_id > last_known_id:
-                new_ids_detected.add(notice_id)
-        
-        if last_known_id is not None and new_ids_detected:
-            logging.info(
-                "📄 API pagination: найден новый ID > %d на странице %d — прекращаем поиск",
-                last_known_id,
-                page,
-            )
-            break
-        
-        if len(notices) < UPBIT_API_PER_PAGE:
-            logging.info(
-                "📄 API page %d содержит %d записей (<%d) — прекращаем пагинацию",
-                page,
-                len(notices),
-                UPBIT_API_PER_PAGE,
-            )
-            break
-        
-        if last_known_id is None:
-            logging.info("📄 API pagination: первый запуск — ограничиваемся первой страницей")
-            break
+        logging.error(f"⏱️ API timeout после {elapsed:.3f}s")
+        return ([], metadata) if return_metadata else []
+    except requests.ConnectionError as e:
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": f"connection_error: {e}",
+        })
+        logging.error(f"🔌 Connection error после {elapsed:.3f}s: {e}")
+        return ([], metadata) if return_metadata else []
+    except Exception as e:
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": f"unexpected: {e}",
+        })
+        logging.error(f"❌ API error после {elapsed:.3f}s: {e}")
+        return ([], metadata) if return_metadata else []
+    
+    metadata["total_requests"] += 1
+    metadata["status_code"] = response.status_code
+    
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as e:
+        elapsed = time.perf_counter() - start_time
+        status_code = e.response.status_code if e.response else response.status_code
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "status_code": status_code,
+            "error": f"http_{status_code}",
+        })
+        logging.error(f"❌ HTTP {status_code} после {elapsed:.3f}s: {e}")
+        return ([], metadata) if return_metadata else []
+    
+    try:
+        data = response.json()
+    except ValueError as e:
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": f"invalid_json: {e}",
+        })
+        logging.error(f"❌ Невалидный JSON после {elapsed:.3f}s: {e}")
+        return ([], metadata) if return_metadata else []
+    
+    page_latency = time.perf_counter() - page_start
+    
+    if not data.get("success"):
+        elapsed = time.perf_counter() - start_time
+        metadata.update({
+            "latency": elapsed,
+            "status": "error",
+            "error": "success=false",
+        })
+        logging.error("❌ API returned success=false")
+        return ([], metadata) if return_metadata else []
+    
+    notices = data.get("data", {}).get("notices", [])
+    ids = [notice.get("id") for notice in notices if notice.get("id") is not None]
+    metadata["pages_checked"].append({
+        "page": page,
+        "count": len(notices),
+        "ids": ids,
+        "duration": page_latency,
+    })
+    
+    logging.info(
+        "📄 API page 1: %d новостей → ID: %s",
+        len(notices),
+        ids,
+    )
+    
+    for notice in notices:
+        notice_id = notice.get("id")
+        if notice_id is None:
+            continue
+        aggregated_notices[notice_id] = notice
+        if last_known_id is not None and notice_id > last_known_id:
+            new_ids_detected.add(notice_id)
     
     if not aggregated_notices:
         elapsed = time.perf_counter() - start_time
@@ -2637,11 +2615,8 @@ def get_notices_via_api(session, return_metadata=False, *, max_pages=UPBIT_API_M
             "returned_count": 0,
             "unique_ids_count": 0,
         })
-        logging.warning("⚠️ API не вернул новостей на проверенных страницах")
+        logging.warning("⚠️ API не вернул новостей")
         return ([], metadata) if return_metadata else []
-    
-    if metadata["pages_checked"] and metadata["pages_checked"][-1]["page"] == max_pages and metadata["pages_checked"][-1]["count"] == UPBIT_API_PER_PAGE:
-        logging.info("📄 API pagination: достигнут лимит %d страниц", max_pages)
     
     sorted_notices = sorted(
         aggregated_notices.values(),
@@ -2665,25 +2640,24 @@ def get_notices_via_api(session, return_metadata=False, *, max_pages=UPBIT_API_M
     if last_known_id is not None:
         if sorted_new_ids:
             logging.info(
-                "🎯 API pagination: найдено %d новых ID > %d → %s",
+                "🎯 Найдено %d новых ID > %d → %s",
                 len(sorted_new_ids),
                 last_known_id,
                 sorted_new_ids,
             )
         else:
             logging.info(
-                "🎯 API pagination: новых ID > %d не обнаружено на проверенных страницах",
+                "🎯 Новых ID > %d не обнаружено",
                 last_known_id,
             )
     else:
         logging.info(
-            "🎯 API pagination: last_known_id отсутствует — возвращаем топ %d ID",
+            "🎯 Первый запуск — возвращаем топ %d ID",
             len(trimmed_notices),
         )
     
     logging.info(
-        "📦 API pagination summary: страницы=%d, запросов=%d, уникальных ID=%d, возвращаем=%d",
-        metadata["pages_checked_count"],
+        "📦 API: запросов=%d, уникальных ID=%d, возвращаем=%d",
         metadata["total_requests"],
         len(aggregated_notices),
         len(trimmed_notices),
