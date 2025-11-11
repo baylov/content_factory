@@ -900,6 +900,9 @@ def init_driver(enable_cdp=False):
         chrome_options.add_argument('--blink-settings=imagesEnabled=false')
         chrome_options.add_argument('--disable-remote-fonts')
         chrome_options.add_argument('--disable-background-networking')
+        chrome_options.add_argument('--disable-background-timer-throttling')
+        chrome_options.add_argument('--disable-renderer-backgrounding')
+        chrome_options.add_argument('--disable-features=TranslateUI,BlinkGenPropertyTrees')
         chrome_options.add_argument('--disable-default-apps')
         chrome_options.add_argument('--disable-sync')
         chrome_options.add_argument('--disable-translate')
@@ -907,6 +910,11 @@ def init_driver(enable_cdp=False):
         chrome_options.add_argument('--mute-audio')
         chrome_options.add_argument('--disable-breakpad')
         chrome_options.add_argument('--disable-crash-reporter')
+        chrome_options.add_argument('--disable-logging')
+        chrome_options.add_argument('--disable-dev-shm-usage')
+        chrome_options.add_argument('--no-sandbox')
+        chrome_options.add_argument('--disable-gpu')
+        chrome_options.add_argument('--disable-software-rasterizer')
         
         # CDP logging - включаем только если необходимо (Selenium 4.x синтаксис)
         if enable_cdp:
@@ -918,7 +926,7 @@ def init_driver(enable_cdp=False):
             chrome_options.add_argument('--disable-logging')
             chrome_options.add_argument('--log-level=3')
         
-        # Блокировка всех медиа и ненужных ресурсов через prefs
+        # Агрессивная блокировка всех ненужных ресурсов через prefs
         prefs = {
             'profile.managed_default_content_settings.images': 2,
             'profile.managed_default_content_settings.stylesheets': 2,  # Блокировать CSS
@@ -928,6 +936,9 @@ def init_driver(enable_cdp=False):
                 'popups': 2,          # Блокировать всплывающие окна
                 'media_stream': 2,    # Блокировать медиа-стримы
                 'stylesheets': 2,     # Блокировать стили (может повлиять на структуру!)
+                'fonts': 2,           # Блокировать шрифты
+                'javascript': 1,       # Разрешить JS (нужен для парсинга)
+                'cookies': 1,          # Разрешить куки
             }
         }
         chrome_options.add_experimental_option('prefs', prefs)
@@ -955,8 +966,8 @@ def init_driver(enable_cdp=False):
             fix_hairline=True,
         )
 
-        # Увеличиваем timeout до 10 секунд для обхода блокировки
-        driver.set_page_load_timeout(10)
+        # Уменьшаем timeout до 3 секунд для оптимизации скорости
+        driver.set_page_load_timeout(3)
         
         # Убираем implicit wait - будем использовать explicit wait только для списка новостей
         driver.implicitly_wait(0)
@@ -1271,7 +1282,7 @@ def retry_exact_id_selector(driver, max_retries=5, retry_interval=0.04, max_tota
     }
 
 
-def wait_for_notices_js(driver, max_wait=0.3):
+def wait_for_notices_js(driver, max_wait=0.15):
     """
     Ждет появления новостей, проверяя каждые 20ms.
     Использует lightweight readiness probe с отслеживанием стабильности.
@@ -1281,12 +1292,12 @@ def wait_for_notices_js(driver, max_wait=0.3):
             probe_stats содержит: duration, poll_count, strategy
     """
     start = time.time()
-    check_interval = 0.02  # 20ms
+    check_interval = 0.015  # 15ms
     poll_count = 0
     
     last_count = -1
     stable_count = 0
-    required_stable_samples = 2  # Require 2 consecutive stable samples
+    required_stable_samples = 1  # Require 1 consecutive stable sample (faster)
     
     detected_strategy = None
     
@@ -2387,7 +2398,7 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
                 f"⏳ Notices not ready immediately ({quick_check_time:.0f}ms, "
                 f"readyState: {probe_result['readyState']}) - waiting..."
             )
-            notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.3)
+            notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.15)
             wait_time = time.time() - wait_start
             
             if not notices_ready:
@@ -2395,7 +2406,7 @@ def get_all_notice_ids_with_api(driver, known_endpoints=None, use_cdp=True):
     except Exception as check_error:
         # Если быстрая проверка не сработала, используем обычное ожидание
         logging.debug(f"Quick check failed: {check_error}, using standard wait")
-        notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.3)
+        notices_ready, probe_stats = wait_for_notices_js(driver, max_wait=0.15)
         wait_time = time.time() - wait_start
     
     # Log structured wait phase metrics
